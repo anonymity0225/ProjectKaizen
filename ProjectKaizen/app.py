@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from phase1_preprocessing import execute_phase_1_cleaning, check_cleanliness
+from phase1_preprocessing import execute_phase_1_cleaning, check_cleanliness, is_data_clean
 from phase2_transformation import execute_phase_2_transformation
 from phase3_modelling import run_model_building
 from phase4_visualization import (
@@ -53,11 +53,19 @@ def main():
             df,
             missing_value_strategies=missing_values,
             include_scaling_columns=scaling_columns,
-            custom_code=custom_code,
-            standardize_columns_flag=standardize_columns_flag,
-            handle_outliers_flag=handle_outliers_flag,
-            normalize_columns_flag=normalize_columns_flag
+            custom_code=custom_code
         )
+
+        # Apply additional steps based on user flags
+        if standardize_columns_flag:
+            cleaned_df = standardize_column_names(cleaned_df)
+
+        if handle_outliers_flag:
+            cleaned_df = handle_outliers(cleaned_df)
+
+        if normalize_columns_flag:
+            cleaned_df = normalize_numeric_columns(cleaned_df, include_columns=scaling_columns)
+        
         st.write("### Cleaned Dataset")
         st.dataframe(cleaned_df)
         st.download_button("Download Dataset", cleaned_df.to_csv(index=False), "cleaned_dataset.csv")
