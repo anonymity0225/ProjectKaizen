@@ -23,12 +23,10 @@ def main():
         st.info("Please upload a CSV file to begin.")
         return
 
-    # Load dataset
     df = pd.read_csv(uploaded_file)
     st.write("### Uploaded Dataset")
     st.dataframe(df)
 
-    # Step 2: Cleanliness Check
     if is_data_clean(df):
         st.success("The dataset is already clean. No preprocessing is required.")
         return
@@ -38,78 +36,22 @@ def main():
         st.write("### Cleanliness Report")
         st.json(cleanliness_report)
 
-    # Step 3: Preprocessing Options
     st.subheader("Preprocessing Options")
-    preprocessing_options = configure_preprocessing_options(df)
+    missing_values = {col: st.selectbox(f"Missing value strategy for {col}", ["mean", "median", "mode", "constant", "drop_rows"]) 
+                      for col in df.columns[df.isnull().any()]}
+    scaling_columns = st.multiselect("Columns to normalize", df.select_dtypes(include=["float", "int"]).columns.tolist())
+    custom_code = st.text_area("Custom Code")
 
-    # Step 4: Execute Preprocessing
     if st.button("Run Preprocessing"):
-        run_preprocessing(df, preprocessing_options)
-
-def configure_preprocessing_options(df):
-    """
-    Allows users to configure preprocessing steps.
-    """
-    options = {}
-
-    # Missing value handling
-    st.write("### Missing Value Handling")
-    options["missing_values"] = {}
-    for col in df.columns[df.isnull().any()]:
-        strategy = st.selectbox(f"Missing value strategy for {col}", 
-                                options=["mean", "median", "mode", "constant", "drop_rows"])
-        options["missing_values"][col] = strategy
-        if strategy == "constant":
-            options["missing_values"][f"{col}_constant"] = st.text_input(f"Constant value for {col}")
-
-    # Outlier handling
-    st.write("### Outlier Handling")
-    options["outliers"] = {
-        col: st.selectbox(f"Outlier handling for {col}", options=["None", "iqr", "zscore"]) 
-        for col in df.select_dtypes(include=["float", "int"])
-    }
-
-    # Scaling
-    st.write("### Scaling")
-    options["scaling_columns"] = st.multiselect(
-        "Columns to normalize", 
-        options=df.select_dtypes(include=["float", "int"]).columns.tolist()
-    )
-
-    # Custom code
-    st.write("### Custom Code")
-    options["custom_code"] = st.text_area("Write custom Python code (optional)")
-
-    return options
-
-def run_preprocessing(df, options):
-    """
-    Executes preprocessing based on the selected options and displays results.
-    """
-    try:
-        # Run preprocessing pipeline
         cleaned_df = execute_phase_1_cleaning(
             df,
-            missing_value_strategies=options["missing_values"],
-            outlier_methods=options["outliers"],
-            include_scaling_columns=options["scaling_columns"],
-            custom_code=options["custom_code"]
+            missing_value_strategies=missing_values,
+            include_scaling_columns=scaling_columns,
+            custom_code=custom_code
         )
-
-        # Display cleaned dataset
         st.write("### Cleaned Dataset")
         st.dataframe(cleaned_df)
-
-        # Download button for the cleaned dataset
-        st.download_button(
-            label="Download Preprocessed Dataset",
-            data=cleaned_df.to_csv(index=False),
-            file_name="preprocessed.csv",
-            mime="text/csv"
-        )
-    except Exception as e:
-        st.error(f"An error occurred during preprocessing: {e}")
-
+        st.download_button("Download Dataset", cleaned_df.to_csv(index=False), "cleaned_dataset.csv")
 
 # Phase 2: Transformation
 def transformation_ui():
