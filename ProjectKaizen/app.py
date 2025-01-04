@@ -12,10 +12,10 @@ from phase4_visualization import (
 
 # Initialize Streamlit app
 st.set_page_config(page_title="ProjectKaizen", layout="wide")
-st.title("Project Kaizen: Phase 1 - Preprocessing")
+st.title("Project Kaizen: Preprocessing Workflow")
 
 def main():
-    st.header("Data Preprocessing Workflow")
+    st.header("Data Preprocessing")
 
     # Step 1: File Upload
     uploaded_file = st.file_uploader("Upload Your Dataset (CSV)", type="csv")
@@ -23,16 +23,16 @@ def main():
         st.info("Please upload a CSV file to begin.")
         return
 
+    # Load dataset
     df = pd.read_csv(uploaded_file)
     st.write("### Uploaded Dataset")
     st.dataframe(df)
 
-    # Step 2: Check Cleanliness
+    # Step 2: Cleanliness Check
     if is_data_clean(df):
         st.success("The dataset is already clean. No preprocessing is required.")
         return
 
-    # Option to generate cleanliness report
     if st.button("Generate Cleanliness Report"):
         cleanliness_report = check_cleanliness(df)
         st.write("### Cleanliness Report")
@@ -48,15 +48,12 @@ def main():
 
 def configure_preprocessing_options(df):
     """
-    Allows the user to configure preprocessing options:
-    - Missing value handling
-    - Outlier handling
-    - Scaling
-    - Custom code
+    Allows users to configure preprocessing steps.
     """
     options = {}
 
     # Missing value handling
+    st.write("### Missing Value Handling")
     options["missing_values"] = {}
     for col in df.columns[df.isnull().any()]:
         strategy = st.selectbox(f"Missing value strategy for {col}", 
@@ -66,38 +63,44 @@ def configure_preprocessing_options(df):
             options["missing_values"][f"{col}_constant"] = st.text_input(f"Constant value for {col}")
 
     # Outlier handling
-    options["handle_outliers_flag"] = st.checkbox("Enable Outlier Handling", value=True)
-    if options["handle_outliers_flag"]:
-        options["outliers"] = {
-            col: st.selectbox(f"Outlier handling for {col}", options=["None", "iqr", "zscore"])
-            for col in df.select_dtypes(include=["float", "int"])
-        }
+    st.write("### Outlier Handling")
+    options["outliers"] = {
+        col: st.selectbox(f"Outlier handling for {col}", options=["None", "iqr", "zscore"]) 
+        for col in df.select_dtypes(include=["float", "int"])
+    }
 
     # Scaling
+    st.write("### Scaling")
     options["scaling_columns"] = st.multiselect(
         "Columns to normalize", 
         options=df.select_dtypes(include=["float", "int"]).columns.tolist()
     )
 
     # Custom code
+    st.write("### Custom Code")
     options["custom_code"] = st.text_area("Write custom Python code (optional)")
 
     return options
 
 def run_preprocessing(df, options):
     """
-    Executes the preprocessing workflow based on user-selected options.
+    Executes preprocessing based on the selected options and displays results.
     """
     try:
+        # Run preprocessing pipeline
         cleaned_df = execute_phase_1_cleaning(
             df,
             missing_value_strategies=options["missing_values"],
-            outlier_methods=options.get("outliers") if options["handle_outliers_flag"] else None,
+            outlier_methods=options["outliers"],
             include_scaling_columns=options["scaling_columns"],
             custom_code=options["custom_code"]
         )
+
+        # Display cleaned dataset
         st.write("### Cleaned Dataset")
         st.dataframe(cleaned_df)
+
+        # Download button for the cleaned dataset
         st.download_button(
             label="Download Preprocessed Dataset",
             data=cleaned_df.to_csv(index=False),
@@ -106,6 +109,7 @@ def run_preprocessing(df, options):
         )
     except Exception as e:
         st.error(f"An error occurred during preprocessing: {e}")
+
 
 # Phase 2: Transformation
 def transformation_ui():
