@@ -1,6 +1,6 @@
 import streamlit as st
 import pandas as pd
-from phase1_preprocessing import execute_phase_1_cleaning, check_cleanliness, is_data_clean
+from phase1_preprocessing import execute_phase_1_cleaning, check_cleanliness
 from phase2_transformation import execute_phase_2_transformation
 from phase3_modelling import run_model_building
 from phase4_visualization import (
