@@ -12,80 +12,100 @@ from phase4_visualization import (
 
 # Initialize Streamlit app
 st.set_page_config(page_title="ProjectKaizen", layout="wide")
-st.title("Project Kaizen")
+st.title("Project Kaizen: Phase 1 - Preprocessing")
 
 def main():
-    # Sidebar navigation
-    st.sidebar.title("Navigation")
-    app_mode = st.sidebar.radio(
-        "Choose Phase",
-        ["Phase 1: Preprocessing", "Phase 2: Transformation", "Phase 3: Modeling", "Phase 4: Visualization"]
+    st.header("Data Preprocessing Workflow")
+
+    # Step 1: File Upload
+    uploaded_file = st.file_uploader("Upload Your Dataset (CSV)", type="csv")
+    if not uploaded_file:
+        st.info("Please upload a CSV file to begin.")
+        return
+
+    df = pd.read_csv(uploaded_file)
+    st.write("### Uploaded Dataset")
+    st.dataframe(df)
+
+    # Step 2: Check Cleanliness
+    if is_data_clean(df):
+        st.success("The dataset is already clean. No preprocessing is required.")
+        return
+
+    # Option to generate cleanliness report
+    if st.button("Generate Cleanliness Report"):
+        cleanliness_report = check_cleanliness(df)
+        st.write("### Cleanliness Report")
+        st.json(cleanliness_report)
+
+    # Step 3: Preprocessing Options
+    st.subheader("Preprocessing Options")
+    preprocessing_options = configure_preprocessing_options(df)
+
+    # Step 4: Execute Preprocessing
+    if st.button("Run Preprocessing"):
+        run_preprocessing(df, preprocessing_options)
+
+def configure_preprocessing_options(df):
+    """
+    Allows the user to configure preprocessing options:
+    - Missing value handling
+    - Outlier handling
+    - Scaling
+    - Custom code
+    """
+    options = {}
+
+    # Missing value handling
+    options["missing_values"] = {}
+    for col in df.columns[df.isnull().any()]:
+        strategy = st.selectbox(f"Missing value strategy for {col}", 
+                                options=["mean", "median", "mode", "constant", "drop_rows"])
+        options["missing_values"][col] = strategy
+        if strategy == "constant":
+            options["missing_values"][f"{col}_constant"] = st.text_input(f"Constant value for {col}")
+
+    # Outlier handling
+    options["handle_outliers_flag"] = st.checkbox("Enable Outlier Handling", value=True)
+    if options["handle_outliers_flag"]:
+        options["outliers"] = {
+            col: st.selectbox(f"Outlier handling for {col}", options=["None", "iqr", "zscore"])
+            for col in df.select_dtypes(include=["float", "int"])
+        }
+
+    # Scaling
+    options["scaling_columns"] = st.multiselect(
+        "Columns to normalize", 
+        options=df.select_dtypes(include=["float", "int"]).columns.tolist()
     )
 
-    # Call the corresponding UI function based on user selection
-    phase_functions = {
-        "Phase 1: Preprocessing": preprocessing_ui,
-        "Phase 2: Transformation": transformation_ui,
-        "Phase 3: Modeling": modeling_ui,
-        "Phase 4: Visualization": visualization_ui,
-    }
-    phase_functions[app_mode]()
+    # Custom code
+    options["custom_code"] = st.text_area("Write custom Python code (optional)")
 
-# Phase 1: Preprocessing
-def preprocessing_ui():
-    st.header("Phase 1: Data Preprocessing")
-    uploaded_file = st.file_uploader("Upload Your Dataset (CSV)", type="csv")
+    return options
 
-    if uploaded_file:
-        df = pd.read_csv(uploaded_file)
-        st.write("### Uploaded Dataset")
-        st.dataframe(df)
-
-        # Check if data is clean
-        if is_data_clean(df):
-            st.success("The dataset is already clean. No preprocessing is required.")
-            return
-
-        # Cleanliness report
-        if st.button("Generate Cleanliness Report"):
-            cleanliness_report = check_cleanliness(df)
-            st.write("### Cleanliness Report", cleanliness_report)
-
-        # Preprocessing Options
-        missing_values, outliers, scaling_columns, custom_code = preprocessing_options_ui(df)
-
-        # Run Preprocessing
-        if st.button("Run Preprocessing"):
-            process_data(df, missing_values, outliers, scaling_columns, custom_code)
-
-def preprocessing_options_ui(df):
-    st.subheader("Preprocessing Options")
-    missing_values, fill_values = {}, {}
-    for col in df.columns[df.isnull().any()]:
-        strategy = st.selectbox(f"Missing value strategy for {col}", options=["mean", "median", "mode", "constant", "drop_rows"])
-        missing_values[col] = strategy
-        if strategy == "constant":
-            fill_values[col] = st.text_input(f"Constant value for {col}")
-    outliers = {col: st.selectbox(f"Outlier handling for {col}", options=["None", "iqr", "zscore"]) 
-                for col in df.select_dtypes(include=["float", "int"])}
-    scaling_columns = st.multiselect("Columns to normalize", options=df.select_dtypes(include=["float", "int"]).columns.tolist())
-    custom_code = st.text_area("Write custom Python code (optional)")
-    return missing_values, outliers, scaling_columns, custom_code
-
-def process_data(df, missing_values, outliers, scaling_columns, custom_code):
+def run_preprocessing(df, options):
+    """
+    Executes the preprocessing workflow based on user-selected options.
+    """
     try:
         cleaned_df = execute_phase_1_cleaning(
-            df, 
-            missing_value_strategies=missing_values,
-            outlier_methods=outliers,
-            include_scaling_columns=scaling_columns,
-            custom_code=custom_code
+            df,
+            missing_value_strategies=options["missing_values"],
+            outlier_methods=options.get("outliers") if options["handle_outliers_flag"] else None,
+            include_scaling_columns=options["scaling_columns"],
+            custom_code=options["custom_code"]
         )
         st.write("### Cleaned Dataset")
         st.dataframe(cleaned_df)
-        st.download_button("Download Preprocessed Dataset", cleaned_df.to_csv(index=False), "preprocessed.csv")
+        st.download_button(
+            label="Download Preprocessed Dataset",
+            data=cleaned_df.to_csv(index=False),
+            file_name="preprocessed.csv",
+            mime="text/csv"
+        )
     except Exception as e:
-        st.error(f"Error during preprocessing: {e}")
+        st.error(f"An error occurred during preprocessing: {e}")
 
 # Phase 2: Transformation
 def transformation_ui():
