@@ -37,17 +37,26 @@ def main():
         st.json(cleanliness_report)
 
     st.subheader("Preprocessing Options")
+    
     missing_values = {col: st.selectbox(f"Missing value strategy for {col}", ["mean", "median", "mode", "constant", "drop_rows"]) 
                       for col in df.columns[df.isnull().any()]}
     scaling_columns = st.multiselect("Columns to normalize", df.select_dtypes(include=["float", "int"]).columns.tolist())
     custom_code = st.text_area("Custom Code")
+
+    # New flags for selective function execution
+    standardize_columns_flag = st.checkbox("Standardize Column Names", value=True)
+    handle_outliers_flag = st.checkbox("Handle Outliers", value=False)
+    normalize_columns_flag = st.checkbox("Normalize Numeric Columns", value=True)
 
     if st.button("Run Preprocessing"):
         cleaned_df = execute_phase_1_cleaning(
             df,
             missing_value_strategies=missing_values,
             include_scaling_columns=scaling_columns,
-            custom_code=custom_code
+            custom_code=custom_code,
+            standardize_columns_flag=standardize_columns_flag,
+            handle_outliers_flag=handle_outliers_flag,
+            normalize_columns_flag=normalize_columns_flag
         )
         st.write("### Cleaned Dataset")
         st.dataframe(cleaned_df)
