@@ -1,168 +1,174 @@
-# phase2_transformation.py
-
+# data_transform_utils.py
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler, LabelEncoder, MinMaxScaler, RobustScaler
-import streamlit as st
+from sklearn.preprocessing import OneHotEncoder, LabelEncoder, MinMaxScaler, StandardScaler
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.decomposition import PCA
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer, WordNetLemmatizer
 
-### Task 1: Data Normalization/Scaling
-def scale_data(df, scaler_type='StandardScaler', columns=None):
+# Utility Functions for Data Transformation
+
+def extract_date_components(df, column, components):
     """
-    Scales specified numerical columns in the dataframe.
-
-    Parameters:
-    - df (pd.DataFrame): Input dataframe
-    - scaler_type (str): Type of scaler to use ('StandardScaler', 'MinMaxScaler', or 'RobustScaler')
-    - columns (list): List of columns to scale; scales all numerical columns if None
-
+    Extract specified components from a datetime column.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        column (str): Name of the datetime column.
+        components (list): List of components to extract (e.g., ["year", "month", "day"]).
+        
     Returns:
-    - pd.DataFrame: Scaled dataframe
+        pd.DataFrame: Updated DataFrame with new columns for the extracted components.
     """
-    scalers = {
-        'StandardScaler': StandardScaler(),
-        'MinMaxScaler': MinMaxScaler(),
-        'RobustScaler': RobustScaler()
-    }
-    scaler = scalers.get(scaler_type)
-    if not scaler:
-        raise ValueError("Invalid scaler type. Choose 'StandardScaler', 'MinMaxScaler', or 'RobustScaler'.")
-
-    if columns is None:
-        columns = df.select_dtypes(include=['float64', 'int64']).columns
-
-    df_scaled = df.copy()
-    try:
-        df_scaled[columns] = scaler.fit_transform(df[columns])
-    except Exception as e:
-        st.error(f"Error scaling data: {e}")
-    return df_scaled
-
-
-### Task 2: Encoding Categorical Variables
-def encode_categorical(df, encoding_type='onehot', columns=None):
-    """
-    Encodes specified categorical columns in the dataframe.
-
-    Parameters:
-    - df (pd.DataFrame): Input dataframe
-    - encoding_type (str): Type of encoding ('onehot' or 'label')
-    - columns (list): List of columns to encode; encodes all categorical columns if None
-
-    Returns:
-    - pd.DataFrame: Encoded dataframe
-    """
-    if columns is None:
-        columns = df.select_dtypes(include=['object', 'category']).columns
-
-    df_encoded = df.copy()
-    try:
-        if encoding_type == 'onehot':
-            df_encoded = pd.get_dummies(df_encoded, columns=columns, drop_first=True)
-        elif encoding_type == 'label':
-            for col in columns:
-                le = LabelEncoder()
-                df_encoded[col] = le.fit_transform(df_encoded[col])
-        else:
-            raise ValueError("Invalid encoding type. Choose 'onehot' or 'label'.")
-    except Exception as e:
-        st.error(f"Error encoding categorical data: {e}")
-    return df_encoded
-
-
-### Task 3: Custom Code Execution
-def execute_custom_code(df, user_code=None, user_prompt=None):
-    """
-    Allows the user to execute custom code or use a prompt-based helper on the dataset.
-
-    Parameters:
-    - df (pd.DataFrame): Input dataframe
-    - user_code (str): Custom Python code to execute
-    - user_prompt (str): Prompt for automatic dataset transformation
-
-    Returns:
-    - pd.DataFrame: Transformed dataframe
-    """
-    df_transformed = df.copy()
-    try:
-        if user_code:
-            exec(user_code)
-        elif user_prompt:
-            st.info(f"Executing transformation based on user prompt: {user_prompt}")
-            # Example: Simple prompt-to-code mapping (extend this with AI-based models if needed)
-            if "add column" in user_prompt.lower():
-                df_transformed["new_column"] = 0  # Placeholder logic
-            else:
-                raise ValueError("Prompt not recognized. Please specify an appropriate transformation.")
-    except Exception as e:
-        st.error(f"Error executing custom code/prompt: {e}")
-    return df_transformed
-
-
-### Task 4: Transformation Check
-def is_already_transformed(df, transformed_flags=None):
-    """
-    Checks if the dataset has already been transformed.
-
-    Parameters:
-    - df (pd.DataFrame): Input dataframe
-    - transformed_flags (dict): Flags indicating transformation states (optional)
-
-    Returns:
-    - bool: True if dataset is already transformed, False otherwise
-    """
-    if transformed_flags is None:
-        # Example heuristic: Check for standard transformation artifacts
-        return "new_column" in df.columns or any("_encoded" in col for col in df.columns)
-    return any(transformed_flags.values())
-
-
-### Main Function
-def execute_phase_2_transformation(
-    df,
-    scaler_type='StandardScaler',
-    encoding_type='onehot',
-    columns_to_scale=None,
-    columns_to_encode=None,
-    custom_code=None,
-    custom_prompt=None
-):
-    """
-    Executes the transformations for phase 2.
-
-    Parameters:
-    - df (pd.DataFrame): Input dataframe
-    - scaler_type (str): Scaler type for numeric scaling
-    - encoding_type (str): Encoding type for categorical variables
-    - columns_to_scale (list): Columns to scale; scales all numeric columns if None
-    - columns_to_encode (list): Columns to encode; encodes all categorical columns if None
-    - custom_code (str): Custom Python code for transformation
-    - custom_prompt (str): Prompt-based helper for transformation
-
-    Returns:
-    - pd.DataFrame: Transformed dataframe
-    """
-    st.write("Checking if the dataset is already transformed...")
-    if is_already_transformed(df):
-        st.warning("The dataset appears to be already transformed. Proceeding with optional transformations only.")
-
-    try:
-        # Scale data
-        if st.checkbox("Apply Scaling?"):
-            st.write("Scaling selected columns...")
-            df = scale_data(df, scaler_type=scaler_type, columns=columns_to_scale)
-
-        # Encode categorical variables
-        if st.checkbox("Apply Encoding?"):
-            st.write("Encoding selected columns...")
-            df = encode_categorical(df, encoding_type=encoding_type, columns=columns_to_encode)
-
-        # Custom code or prompt execution
-        if custom_code or custom_prompt:
-            st.write("Executing custom code or prompt-based transformation...")
-            df = execute_custom_code(df, user_code=custom_code, user_prompt=custom_prompt)
-
-        st.success("Phase 2 Transformation completed.")
-    except Exception as e:
-        st.error(f"Error during transformation: {e}")
-
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+    if not np.issubdtype(df[column].dtype, np.datetime64):
+        df[column] = pd.to_datetime(df[column], errors='coerce')
+    
+    for component in components:
+        if component == "year":
+            df[f"{column}_year"] = df[column].dt.year
+        elif component == "month":
+            df[f"{column}_month"] = df[column].dt.month
+        elif component == "day":
+            df[f"{column}_day"] = df[column].dt.day
+        elif component == "hour":
+            df[f"{column}_hour"] = df[column].dt.hour
     return df
+
+def encode_categorical(df, column, method="onehot", custom_mapping=None):
+    """
+    Encode categorical features.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        column (str): Column to encode.
+        method (str): Encoding method ("onehot", "label", "frequency", "custom").
+        custom_mapping (dict): Mapping for custom encoding (if applicable).
+        
+    Returns:
+        pd.DataFrame: Transformed DataFrame.
+    """
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+    
+    if method == "onehot":
+        ohe = OneHotEncoder(sparse=False)
+        encoded = ohe.fit_transform(df[[column]])
+        encoded_df = pd.DataFrame(encoded, columns=ohe.get_feature_names_out([column]))
+        df = pd.concat([df, encoded_df], axis=1).drop(column, axis=1)
+    elif method == "label":
+        le = LabelEncoder()
+        df[column] = le.fit_transform(df[column])
+    elif method == "frequency":
+        freq = df[column].value_counts(normalize=True)
+        df[column] = df[column].map(freq)
+    elif method == "custom" and custom_mapping:
+        df[column] = df[column].map(custom_mapping)
+    else:
+        raise ValueError("Invalid encoding method or missing custom mapping.")
+    
+    return df
+
+def scale_numeric(df, column, method="minmax", custom_range=(0, 1)):
+    """
+    Scale numerical features.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        column (str): Column to scale.
+        method (str): Scaling method ("minmax", "standard", "log", "custom").
+        custom_range (tuple): Custom min/max range for scaling (if applicable).
+        
+    Returns:
+        pd.DataFrame: Transformed DataFrame.
+    """
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+    
+    if method == "minmax":
+        scaler = MinMaxScaler(feature_range=custom_range)
+        df[column] = scaler.fit_transform(df[[column]])
+    elif method == "standard":
+        scaler = StandardScaler()
+        df[column] = scaler.fit_transform(df[[column]])
+    elif method == "log":
+        df[column] = np.log1p(df[column])
+    elif method == "custom":
+        min_val, max_val = custom_range
+        df[column] = (df[column] - min_val) / (max_val - min_val)
+    else:
+        raise ValueError("Invalid scaling method.")
+    
+    return df
+
+def tokenize_text(df, column, method="stemming"):
+    """
+    Process text features via tokenization and optional stemming or lemmatization.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        column (str): Text column to process.
+        method (str): Text processing method ("stemming" or "lemmatization").
+        
+    Returns:
+        pd.DataFrame: Updated DataFrame with processed text.
+    """
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+    
+    tokens_list = []
+    stop_words = set(stopwords.words("english"))
+    stemmer = PorterStemmer()
+    lemmatizer = WordNetLemmatizer()
+    
+    for text in df[column].astype(str):
+        tokens = word_tokenize(text.lower())
+        tokens = [word for word in tokens if word.isalpha() and word not in stop_words]
+        if method == "stemming":
+            tokens = [stemmer.stem(word) for word in tokens]
+        elif method == "lemmatization":
+            tokens = [lemmatizer.lemmatize(word) for word in tokens]
+        tokens_list.append(" ".join(tokens))
+    
+    df[column] = tokens_list
+    return df
+
+def apply_tfidf_vectorization(df, column, max_features=1000):
+    """
+    Apply TF-IDF vectorization to a text column.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        column (str): Text column to vectorize.
+        max_features (int): Maximum number of features for the TF-IDF matrix.
+        
+    Returns:
+        pd.DataFrame: Updated DataFrame with vectorized features.
+    """
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in DataFrame.")
+    
+    vectorizer = TfidfVectorizer(max_features=max_features)
+    tfidf_matrix = vectorizer.fit_transform(df[column])
+    tfidf_df = pd.DataFrame(tfidf_matrix.toarray(), columns=vectorizer.get_feature_names_out())
+    df = pd.concat([df.drop(column, axis=1), tfidf_df], axis=1)
+    return df
+
+# Custom User Code Area
+def custom_user_prompt(df, action):
+    """
+    Allow users to define custom actions on the DataFrame.
+    
+    Args:
+        df (pd.DataFrame): Input DataFrame.
+        action (callable): User-defined function or lambda to apply on the DataFrame.
+        
+    Returns:
+        pd.DataFrame: DataFrame after applying the custom action.
+    """
+    if not callable(action):
+        raise ValueError("Provided action must be a callable function or lambda.")
+    return action(df)
