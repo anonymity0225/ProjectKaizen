@@ -6,4 +6,4 @@ numpy
 matplotlib
 seaborn
 xgboost
-
+plotly
