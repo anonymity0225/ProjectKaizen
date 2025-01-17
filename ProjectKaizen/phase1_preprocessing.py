@@ -1,179 +1,163 @@
 import pandas as pd
 import numpy as np
-from sklearn.preprocessing import StandardScaler
 import logging
 
 # Configure logging
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 
-# Function to check data cleanliness
-def check_cleanliness(df):
-    logging.info("Checking data cleanliness...")
-    cleanliness_report = {
+# ------------------- Utility Functions ------------------- #
+def generate_cleanliness_report(df):
+    """
+    Generates a cleanliness report for a dataset.
+
+    Args:
+        df (pd.DataFrame): The input dataframe.
+
+    Returns:
+        dict: A report summarizing missing values, duplicates, and data types.
+    """
+    report = {
         "missing_values": df.isnull().sum().to_dict(),
-        "duplicate_rows": df.duplicated().sum(),
-        "outliers": {
-            col: ((df[col] < df[col].quantile(0.25) - 1.5 * (df[col].quantile(0.75) - df[col].quantile(0.25))) |
-                  (df[col] > df[col].quantile(0.75) + 1.5 * (df[col].quantile(0.75) - df[col].quantile(0.25)))).sum()
-            for col in df.select_dtypes(include=[np.number]).columns
-        },
-        "string_inconsistencies": [
-            col for col in df.select_dtypes(include=["object", "category"]).columns
-            if df[col].str.strip().ne(df[col]).any()
-        ],
+        "missing_percentage": (df.isnull().mean() * 100).to_dict(),
+        "duplicates": df.duplicated().sum(),
+        "data_types": df.dtypes.astype(str).to_dict()
     }
-    logging.info("Cleanliness report generated.")
-    return cleanliness_report
+    return report
 
-# Function to check if data is already clean
-def is_data_clean(df):
-    cleanliness = check_cleanliness(df)
-    if all(v == 0 for v in cleanliness["missing_values"].values()) and cleanliness["duplicate_rows"] == 0 and \
-       all(count == 0 for count in cleanliness["outliers"].values()) and not cleanliness["string_inconsistencies"]:
-        return True
-    return False
+def standardize_column_names(df):
+    """Standardize column names by stripping, lowering case, and replacing spaces with underscores."""
+    df.columns = df.columns.str.strip().str.lower().str.replace(" ", "_", regex=True)
+    return df
 
-# Function to handle missing values
 def handle_missing_values(df, strategies=None, fill_values=None):
-    logging.info("Handling missing values...")
+    """Handle missing values based on user-specified strategies."""
     strategies = strategies or {}
     fill_values = fill_values or {}
 
     for col in df.columns:
         if df[col].isnull().sum() > 0:
-            if col in strategies:
-                strategy = strategies[col]
-                if strategy == "mean" and pd.api.types.is_numeric_dtype(df[col]):
-                    df[col] = df[col].fillna(df[col].mean())
-                elif strategy == "median" and pd.api.types.is_numeric_dtype(df[col]):
-                    df[col] = df[col].fillna(df[col].median())
-                elif strategy == "mode":
-                    df[col] = df[col].fillna(df[col].mode()[0])
-                elif strategy == "constant" and col in fill_values:
-                    df[col] = df[col].fillna(fill_values[col])
-                elif strategy == "drop_rows":
-                    df = df.dropna(subset=[col])
-    logging.info("Missing values handled.")
+            strategy = strategies.get(col, "none")
+            if strategy == "mean" and pd.api.types.is_numeric_dtype(df[col]):
+                df[col].fillna(df[col].mean(), inplace=True)
+                df[col] = df[col].round()  # Round the column values
+            elif strategy == "median" and pd.api.types.is_numeric_dtype(df[col]):
+                df[col].fillna(df[col].median(), inplace=True)
+                df[col] = df[col].round()  # Round the column values
+            elif strategy == "mode":
+                mode_value = df[col].mode()
+                if not mode_value.empty:
+                    df[col].fillna(mode_value[0], inplace=True)
+            elif strategy == "constant" and col in fill_values:
+                df[col].fillna(fill_values[col], inplace=True)
+            elif strategy == "drop_rows":
+                df.dropna(subset=[col], inplace=True)
     return df
 
-# Function to standardize column names
-def standardize_column_names(df):
-    logging.info("Standardizing column names...")
-    df.columns = df.columns.str.lower().str.replace(" ", "_")
-    logging.info("Column names standardized.")
+def remove_duplicates(df, keep="first"):
+    """Remove duplicate rows from the dataset."""
+    df.drop_duplicates(keep=keep, inplace=True)
     return df
 
-# Function to handle outliers
-def handle_outliers(df, methods=None, thresholds=None, log_changes=False):
-    logging.info("Handling outliers...")
-    if not methods:
-        logging.info("No outlier methods specified. Skipping outlier handling.")
-        return df
-
-    thresholds = thresholds or {}
+def detect_outliers(df, methods=None, thresholds=None):
+    """Detect outliers based on user-specified methods and thresholds."""
     outlier_log = {}
+    methods = methods or {}
+    thresholds = thresholds or {}
 
-    for col in methods.keys():
-        if col not in df.columns:
+    for col, method in methods.items():
+        if col not in df.columns or not pd.api.types.is_numeric_dtype(df[col]):
             continue
-        method = methods[col]
-        threshold = thresholds.get(col, 3.0)
 
+        threshold = thresholds.get(col, 3.0)
         if method == "iqr":
             Q1 = df[col].quantile(0.25)
             Q3 = df[col].quantile(0.75)
             IQR = Q3 - Q1
             lower_bound = Q1 - 1.5 * IQR
             upper_bound = Q3 + 1.5 * IQR
-            if log_changes:
-                outlier_log[col] = {
-                    "lower_bound": lower_bound,
-                    "upper_bound": upper_bound,
-                    "outliers_count": ((df[col] < lower_bound) | (df[col] > upper_bound)).sum()
-                }
-            df[col] = np.clip(df[col], lower_bound, upper_bound)
-
+            outlier_mask = (df[col] < lower_bound) | (df[col] > upper_bound)
         elif method == "zscore":
             mean = df[col].mean()
             std = df[col].std()
             z_scores = (df[col] - mean) / std
-            if log_changes:
-                outlier_log[col] = {
-                    "threshold": threshold,
-                    "outliers_count": ((z_scores < -threshold) | (z_scores > threshold)).sum()
-                }
-            df[col] = np.where(z_scores < -threshold, mean - threshold * std, df[col])
-            df[col] = np.where(z_scores > threshold, mean + threshold * std, df[col])
+            outlier_mask = (z_scores < -threshold) | (z_scores > threshold)
+        else:
+            continue
 
-    logging.info("Outliers handled.")
-    if log_changes:
-        return df, outlier_log
+        outlier_log[col] = {
+            "outlier_count": outlier_mask.sum(),
+            "outlier_mask": outlier_mask
+        }
+    return outlier_log
+
+def handle_outliers(df, outlier_log, strategy="replace"):
+    """Handle outliers based on user-specified strategy."""
+    for col, outlier_info in outlier_log.items():
+        outlier_mask = outlier_info["outlier_mask"]
+        if strategy == "replace":
+            df.loc[outlier_mask, col] = np.nan
+        elif strategy == "clip":
+            Q1 = df[col].quantile(0.25)
+            Q3 = df[col].quantile(0.75)
+            IQR = Q3 - Q1
+            lower_bound = Q1 - 1.5 * IQR
+            upper_bound = Q3 + 1.5 * IQR
+            df[col] = np.clip(df[col], lower_bound, upper_bound)
+        # Ensure handled values are rounded for numerical consistency
+        if pd.api.types.is_numeric_dtype(df[col]):
+            df[col] = df[col].round()
     return df
 
-# Function to normalize numeric columns
-def normalize_numeric_columns(df, include_columns=None):
-    logging.info("Normalizing numeric columns...")
-    numeric_columns = include_columns or df.select_dtypes(include=[np.number]).columns.tolist()
+def preprocess_data(df, actions):
+    """Preprocess data based on user-selected actions."""
+    if actions.get("standardize_column_names"):
+        df = standardize_column_names(df)
 
-    if len(numeric_columns) == 0:
-        logging.warning("No numeric columns found for normalization.")
-        return df
+    if actions.get("handle_missing_values"):
+        df = handle_missing_values(
+            df,
+            strategies=actions.get("missing_value_strategies"),
+            fill_values=actions.get("fill_values")
+        )
 
-    scaler = StandardScaler()
-    df[numeric_columns] = scaler.fit_transform(df[numeric_columns])
-    logging.info("Numeric columns normalized.")
+    if actions.get("remove_duplicates"):
+        df = remove_duplicates(df, keep=actions.get("duplicates_keep", "first"))
+
     return df
 
-# Custom User Code Execution
+def delete_rows_or_columns(df, delete_rows=None, delete_columns=None):
+    """
+    Delete specified rows or columns from the dataframe.
+
+    Args:
+        df (pd.DataFrame): The input dataframe.
+        delete_rows (list): List of row indices to delete.
+        delete_columns (list): List of column names to delete.
+
+    Returns:
+        pd.DataFrame: Modified dataframe after deletion.
+    """
+    if delete_rows:
+        df = df.drop(delete_rows, axis=0)
+    if delete_columns:
+        df = df.drop(delete_columns, axis=1)
+    return df
+
 def execute_custom_code(df, custom_code):
-    logging.info("Executing custom user code...")
+    """
+    Executes user-provided custom Python code on the dataframe.
+
+    Args:
+        df (pd.DataFrame): The input dataframe.
+        custom_code (str): User-provided Python code as a string.
+
+    Returns:
+        pd.DataFrame: Modified dataframe after executing custom code.
+    """
+    local_vars = {"df": df}
     try:
-        exec(custom_code, {'df': df, 'pd': pd, 'np': np})
-        logging.info("Custom code executed successfully.")
+        exec(custom_code, {}, local_vars)
+        df = local_vars.get("df", df)  # Retrieve updated dataframe
     except Exception as e:
         logging.error(f"Error executing custom code: {e}")
-        raise e
     return df
-
-# Main function for Phase 1 preprocessing
-def execute_phase_1_cleaning(
-    df,
-    missing_value_strategies=None,
-    fill_values=None,
-    outlier_methods=None,
-    outlier_thresholds=None,
-    outlier_log=False,
-    include_scaling_columns=None,
-    custom_code=None
-):
-    try:
-        logging.info("Starting Phase 1 Cleaning...")
-
-        if is_data_clean(df):
-            logging.info("Data is already clean. Skipping preprocessing steps.")
-            return df
-
-        cleanliness_report = check_cleanliness(df)
-        logging.info("Cleanliness Report: %s", cleanliness_report)
-
-        df_cleaned = handle_missing_values(df, strategies=missing_value_strategies, fill_values=fill_values)
-        df_cleaned = standardize_column_names(df_cleaned)
-
-        if outlier_methods:
-            if outlier_log:
-                df_cleaned, log = handle_outliers(df_cleaned, methods=outlier_methods, thresholds=outlier_thresholds, log_changes=True)
-                logging.info("Outlier log: %s", log)
-            else:
-                df_cleaned = handle_outliers(df_cleaned, methods=outlier_methods, thresholds=outlier_thresholds)
-
-        df_cleaned = normalize_numeric_columns(df_cleaned, include_columns=include_scaling_columns)
-
-        if custom_code:
-            df_cleaned = execute_custom_code(df_cleaned, custom_code)
-
-        logging.info("Phase 1 Cleaning completed successfully.")
-        return df_cleaned
-
-    except Exception as e:
-        logging.error("An error occurred during preprocessing: %s", e)
-        raise e
