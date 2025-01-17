@@ -1,182 +1,192 @@
-import matplotlib.pyplot as plt
-import seaborn as sns
-from sklearn.metrics import confusion_matrix, roc_curve, auc, precision_recall_curve
-from sklearn.preprocessing import label_binarize
-import numpy as np
+import os
 import pandas as pd
-import streamlit as st
+import numpy as np
+import seaborn as sns
+import matplotlib.pyplot as plt
+from matplotlib.ticker import MaxNLocator
+from sklearn.metrics import roc_curve, precision_recall_curve, confusion_matrix, roc_auc_score
+import plotly.express as px
+import plotly.graph_objects as go
+from statsmodels.tsa.seasonal import seasonal_decompose
+from mpl_toolkits.mplot3d import Axes3D
 
-# Enhanced visualization functions
+# Suppress warnings
+import warnings
+warnings.filterwarnings("ignore")
 
-def visualize_model_performance(task_type, models, X_test, y_test, y_preds):
+# Helper function to save the plot
+def save_plot(fig, filename, directory="visualizations", file_format="png"):
+    os.makedirs(directory, exist_ok=True)
+    path = os.path.join(directory, f"{filename}.{file_format}")
+    fig.savefig(path, format=file_format, bbox_inches='tight')
+    print(f"Plot saved to: {path}")
+
+# Dataset Overview Visualizations
+def plot_overview(df, save=False):
     """
-    Visualizes model performance for classification or regression tasks.
-
-    Parameters:
-    - task_type (str): Type of task ('classification' or 'regression')
-    - models (dict): Models to visualize (optional)
-    - X_test (pd.DataFrame): Test features
-    - y_test (pd.Series): Test labels
-    - y_preds (dict): Predictions from models
+    Generate dataset overview plots including histograms, count plots, and heatmap of missing values.
     """
-    try:
-        if task_type == 'classification':
-            visualize_classification(models, X_test, y_test, y_preds)
-        elif task_type == 'regression':
-            visualize_regression(models, X_test, y_test, y_preds)
-        else:
-            raise ValueError("Invalid task type for visualization. Choose 'classification' or 'regression'.")
-    except Exception as e:
-        st.error(f"Error during visualization: {e}")
+    # Histograms for numeric columns
+    numeric_cols = df.select_dtypes(include=np.number).columns
+    for col in numeric_cols:
+        plt.figure(figsize=(8, 5))
+        sns.histplot(df[col], kde=True, bins=30, color='blue')
+        plt.title(f"Histogram of {col}")
+        plt.xlabel(col)
+        plt.ylabel("Frequency")
+        if save:
+            save_plot(plt.gcf(), f"histogram_{col}")
+        plt.show()
 
-# Classification Visualizations
-def visualize_classification(models, X_test, y_test, y_preds):
-    for model_name, y_pred in y_preds.items():
-        st.subheader(f"Visualizing performance for {model_name}")
+    # Count plots for categorical variables
+    categorical_cols = df.select_dtypes(include=['object', 'category']).columns
+    for col in categorical_cols:
+        plt.figure(figsize=(8, 5))
+        sns.countplot(x=col, data=df, palette='viridis')
+        plt.title(f"Count Plot of {col}")
+        plt.xlabel(col)
+        plt.ylabel("Count")
+        if save:
+            save_plot(plt.gcf(), f"countplot_{col}")
+        plt.show()
 
-        # Confusion Matrix
-        st.write("**Confusion Matrix**")
-        cm = confusion_matrix(y_test, y_pred)
-        fig, ax = plt.subplots(figsize=(6, 6))
-        sns.heatmap(cm, annot=True, fmt='d', cmap='Blues', cbar=False, ax=ax)
-        ax.set_title(f'Confusion Matrix for {model_name}')
-        ax.set_xlabel('Predicted Label')
-        ax.set_ylabel('True Label')
-        st.pyplot(fig)
+    # Heatmap of missing values
+    plt.figure(figsize=(10, 6))
+    sns.heatmap(df.isnull(), cbar=False, cmap='viridis')
+    plt.title("Heatmap of Missing Values")
+    if save:
+        save_plot(plt.gcf(), "missing_values_heatmap")
+    plt.show()
 
-        # ROC and Precision-Recall Curves
-        classes = np.unique(y_test)
-        y_test_binarized = label_binarize(y_test, classes=classes)
-
-        # Macro and Micro ROC for Multi-class
-        if len(classes) > 2:  # Multi-class
-            # Macro-average ROC
-            st.write("**Macro-Average ROC Curve**")
-            all_fpr = np.unique(np.concatenate([roc_curve(y_test_binarized[:, i], y_pred == i)[0] for i in range(len(classes))]))
-            mean_tpr = np.zeros_like(all_fpr)
-            for i in range(len(classes)):
-                fpr, tpr, _ = roc_curve(y_test_binarized[:, i], y_pred == i)
-                mean_tpr += np.interp(all_fpr, fpr, tpr)
-            mean_tpr /= len(classes)
-            roc_auc_macro = auc(all_fpr, mean_tpr)
-
-            fig, ax = plt.subplots()
-            ax.plot(all_fpr, mean_tpr, label=f'Macro-average ROC (AUC = {roc_auc_macro:.2f})')
-            ax.plot([0, 1], [0, 1], linestyle='--', color='gray')
-            ax.set_title(f'Macro-Average ROC Curve for {model_name}')
-            ax.set_xlabel('False Positive Rate')
-            ax.set_ylabel('True Positive Rate')
-            ax.legend()
-            st.pyplot(fig)
-        
-        # Binary or One-vs-Rest ROC for Multi-class
-        for i, class_label in enumerate(classes):
-            fpr, tpr, _ = roc_curve(y_test_binarized[:, i], y_pred == class_label)
-            roc_auc = auc(fpr, tpr)
-
-            fig, ax = plt.subplots()
-            ax.plot(fpr, tpr, label=f'Class {class_label} (AUC = {roc_auc:.2f})')
-            ax.plot([0, 1], [0, 1], linestyle='--', color='gray')
-            ax.set_title(f'ROC Curve for {model_name} (Class {class_label})')
-            ax.set_xlabel('False Positive Rate')
-            ax.set_ylabel('True Positive Rate')
-            ax.legend()
-            st.pyplot(fig)
-
-        # Precision-Recall Curve
-        st.write("**Precision-Recall Curve**")
-        for i, class_label in enumerate(classes):
-            precision, recall, _ = precision_recall_curve(y_test_binarized[:, i], y_pred == class_label)
-            fig, ax = plt.subplots()
-            ax.plot(recall, precision, label=f'Class {class_label}')
-            ax.set_title(f'Precision-Recall Curve for {model_name} (Class {class_label})')
-            ax.set_xlabel('Recall')
-            ax.set_ylabel('Precision')
-            ax.legend()
-            st.pyplot(fig)
-
-# Regression Visualizations
-def visualize_regression(models, X_test, y_test, y_preds):
-    for model_name, y_pred in y_preds.items():
-        st.subheader(f"Visualizing performance for {model_name}")
-
-        # Residuals Plot
-        residuals = y_test - y_pred
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.scatterplot(x=y_test, y=residuals, ax=ax)
-        ax.axhline(0, color='red', linestyle='--')
-        ax.set_title(f'Residual Plot for {model_name}')
-        ax.set_xlabel('Actual Values')
-        ax.set_ylabel('Residuals')
-        st.pyplot(fig)
-
-        # Actual vs Predicted Plot
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.scatterplot(x=y_test, y=y_pred, ax=ax)
-        ax.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], color='red', linestyle='--')
-        ax.set_title(f'Actual vs Predicted for {model_name}')
-        ax.set_xlabel('Actual Values')
-        ax.set_ylabel('Predicted Values')
-        st.pyplot(fig)
-
-        # Error Distribution Plot
-        fig, ax = plt.subplots(figsize=(10, 6))
-        sns.histplot(residuals, kde=True, bins=30, ax=ax)
-        ax.set_title(f'Error Distribution for {model_name}')
-        ax.set_xlabel('Residuals')
-        st.pyplot(fig)
-
-# Custom Code Execution
-@st.cache_data
-def execute_custom_code(df, code):
+# Univariate Analysis
+def plot_univariate(df, column, save=False):
     """
-    Executes custom Python code on the provided DataFrame.
-    
-    Parameters:
-    - df (pd.DataFrame): Input DataFrame
-    - code (str): Python code as a string
-
-    Returns:
-    - pd.DataFrame: Modified DataFrame
+    Create univariate analysis plots for the specified column.
     """
-    try:
-        local_vars = {'df': df}
-        exec(code, {}, local_vars)
-        return local_vars['df']
-    except Exception as e:
-        st.error(f"Error executing custom code: {e}")
-        return df
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in dataset.")
 
-# Natural Language to Python Code
-@st.cache_data
-def generate_code_from_prompt(prompt):
-    """
-    Generates Python code based on a natural language prompt.
+    if pd.api.types.is_numeric_dtype(df[column]):
+        # Histogram
+        plt.figure(figsize=(8, 5))
+        sns.histplot(df[column], kde=True, bins=30, color='green')
+        plt.title(f"Histogram of {column}")
+        plt.xlabel(column)
+        plt.ylabel("Frequency")
+        if save:
+            save_plot(plt.gcf(), f"histogram_{column}")
+        plt.show()
 
-    Parameters:
-    - prompt (str): User-provided description of the operation
+        # Boxplot
+        plt.figure(figsize=(8, 5))
+        sns.boxplot(x=df[column], color='cyan')
+        plt.title(f"Boxplot of {column}")
+        plt.xlabel(column)
+        if save:
+            save_plot(plt.gcf(), f"boxplot_{column}")
+        plt.show()
 
-    Returns:
-    - str: Generated Python code
-    """
-    # Basic implementation: Can be replaced with an AI model integration
-    if "top 10 records" in prompt.lower():
-        return "df = df.head(10)"
-    elif "remove nulls" in prompt.lower():
-        return "df = df.dropna()"
-    elif "add column" in prompt.lower():
-        return "df['new_column'] = 0"
+    elif pd.api.types.is_categorical_dtype(df[column]) or pd.api.types.is_object_dtype(df[column]):
+        # Pie chart
+        pie_data = df[column].value_counts()
+        plt.figure(figsize=(8, 5))
+        pie_data.plot.pie(autopct='%1.1f%%', startangle=90, colors=sns.color_palette('pastel'))
+        plt.title(f"Pie Chart of {column}")
+        if save:
+            save_plot(plt.gcf(), f"piechart_{column}")
+        plt.show()
     else:
-        return "# Custom operation: modify df as needed"
+        print(f"Unsupported data type for column '{column}'.")
 
-# Dynamic Visualization Options
+# Bivariate Analysis
+def plot_bivariate(df, x, y, save=False):
+    """
+    Generate bivariate analysis plots for specified x and y columns.
+    """
+    if x not in df.columns or y not in df.columns:
+        raise ValueError(f"Columns '{x}' or '{y}' not found in dataset.")
 
-def show_visualization_options():
-    st.sidebar.header("Visualization Options")
-    default = st.sidebar.selectbox(
-        "Recommended Visualizations", ["Confusion Matrix", "ROC Curve", "Residuals Plot"]
-    )
-    other_options = st.sidebar.multiselect(
-        "Additional Visualizations", ["Precision-Recall Curve", "Error Distribution"]
-    )
-    return default, other_options
+    if pd.api.types.is_numeric_dtype(df[x]) and pd.api.types.is_numeric_dtype(df[y]):
+        # Scatter plot
+        plt.figure(figsize=(8, 5))
+        sns.scatterplot(x=x, y=y, data=df, color='blue', alpha=0.7)
+        plt.title(f"Scatter Plot: {x} vs {y}")
+        plt.xlabel(x)
+        plt.ylabel(y)
+        if save:
+            save_plot(plt.gcf(), f"scatter_{x}_vs_{y}")
+        plt.show()
+
+    elif pd.api.types.is_categorical_dtype(df[x]):
+        # Bar plot
+        plt.figure(figsize=(8, 5))
+        sns.barplot(x=x, y=y, data=df, palette='coolwarm')
+        plt.title(f"Bar Plot: {x} vs {y}")
+        plt.xlabel(x)
+        plt.ylabel(y)
+        if save:
+            save_plot(plt.gcf(), f"barplot_{x}_vs_{y}")
+        plt.show()
+
+    else:
+        print(f"Unsupported data types for columns '{x}' and '{y}'.")
+
+# Correlation and Multivariate Analysis
+def plot_correlation(df, save=False):
+    """
+    Generate correlation heatmap for numeric columns.
+    """
+    numeric_cols = df.select_dtypes(include=np.number).columns
+    corr_matrix = df[numeric_cols].corr()
+
+    plt.figure(figsize=(10, 8))
+    sns.heatmap(corr_matrix, annot=True, cmap='coolwarm', fmt=".2f")
+    plt.title("Correlation Heatmap")
+    if save:
+        save_plot(plt.gcf(), "correlation_heatmap")
+    plt.show()
+
+# Custom Code Interface
+def custom_code_interface(df):
+    """
+    Provide an interactive interface for users to run custom code on the dataset.
+    """
+    print("\nEnter your Python code to interact with the dataset.")
+    print("The dataset is available as the variable 'df'.")
+    print("Type 'exit' to leave the interface.")
+
+    while True:
+        user_input = input(">>> ")
+        if user_input.strip().lower() == 'exit':
+            print("Exiting custom code interface.")
+            break
+        try:
+            exec(user_input, {'df': df, 'pd': pd, 'np': np, 'sns': sns, 'plt': plt})
+        except Exception as e:
+            print(f"Error executing your code: {e}")
+
+'''# Example Usage
+if __name__ == "__main__":
+    # Load example dataset
+    try:
+        file_path = input("Enter the path to your dataset (CSV or Excel): ")
+        if file_path.endswith(".csv"):
+            data = pd.read_csv(file_path)
+        elif file_path.endswith(".xlsx"):
+            data = pd.read_excel(file_path)
+        else:
+            raise ValueError("Unsupported file format. Please provide a CSV or Excel file.")
+
+        print("Dataset loaded successfully!")
+
+        # Example visualizations
+        plot_overview(data, save=True)
+        plot_univariate(data, column=data.columns[0], save=True)
+        plot_bivariate(data, x=data.columns[0], y=data.columns[1], save=True)
+        plot_correlation(data, save=True)
+
+        # Launch custom code interface
+        custom_code_interface(data)
+
+    except Exception as e:
+        print(f"Error: {e}")'''
