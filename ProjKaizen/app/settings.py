@@ -1,0 +1,1 @@
+# Pydantic config models for application settings 
