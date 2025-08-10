@@ -1,164 +1,318 @@
-# Preprocessing routes 
-from fastapi import APIRouter, UploadFile, File, Form, HTTPException, status, Depends, Body
-from fastapi.responses import JSONResponse
-from fastapi.encoders import jsonable_encoder
-from typing import Optional
-import json
+"""
+Preprocessing router with proper error handling and HTTPException conversion.
+"""
+from fastapi import APIRouter, UploadFile, HTTPException, Depends, File, Form
+from typing import Dict, Any, Optional
 import logging
-from ..services.preprocessing import handle_file_upload, preprocess_pipeline
-from ..schemas.preprocess import PreprocessingRequest, PreprocessingResponse
-from ..utils.config_helper import convert_preprocessing_config
-from ..utils.file_io import cleanup_temp_file
 
+from app.services.preprocessing import (
+    handle_file_upload, 
+    preprocess_pipeline,
+    DataPreprocessingService
+)
+from app.schemas.preprocess import (
+    PreprocessingRequest, 
+    PreprocessingResponse,
+    ValidationReport,
+    CleaningConfig,
+    EncodingConfig,
+    FileUploadResponse
+)
+from app.utils.file_io import cleanup_temp_file
+from app.core.exceptions import DataPreprocessingError
+
+router = APIRouter(prefix="/preprocess", tags=["preprocessing"])
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/preprocess", tags=["Preprocessing"])
 
-@router.post(
-    "/run",
-    response_model=PreprocessingResponse,
-    summary="Run data preprocessing pipeline",
-    description="Upload a CSV or Excel file and a preprocessing configuration. Returns cleaned data summary, audit log, and preview."
-)
+@router.post("/upload", response_model=FileUploadResponse)
+async def upload_file(file: UploadFile = File(...)):
+    """
+    Upload and validate a file for preprocessing.
+    
+    Returns:
+        FileUploadResponse with file information and validation results
+    """
+    temp_path = None
+    try:
+        df, temp_path = await handle_file_upload(file)
+        
+        # Validate the data
+        service = DataPreprocessingService()
+        validation_report = service.validate_data(df)
+        
+        return FileUploadResponse(
+            filename=file.filename,
+            file_size=len(df),
+            num_rows=df.shape[0],
+            num_columns=df.shape[1],
+            column_names=list(df.columns),
+            data_types=df.dtypes.astype(str).to_dict(),
+            preview=df.head().to_dict('records')
+        )
+        
+    except DataPreprocessingError as e:
+        logger.error(f"Preprocessing error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": "DataPreprocessingError"
+        })
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        # Cleanup temp file if validation failed
+        if temp_path:
+            try:
+                cleanup_temp_file(temp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp file {temp_path}: {cleanup_error}")
+
+
+@router.post("/run", response_model=PreprocessingResponse)
 async def run_preprocessing(
-    file: UploadFile = File(..., description="CSV or Excel file to preprocess"),
-    preprocessing_config: str = Form(
-        ..., 
-        description="JSON string matching PreprocessingRequest schema",
-        example='{"drop_duplicates": true, "handle_missing": "drop", "encoding_method": "label", "encoding_columns": ["category"], "validate_first": true}'
-    )
+    file: UploadFile = File(...), 
+    config: PreprocessingRequest = Depends()
 ):
     """
-    Run the preprocessing pipeline on an uploaded file and configuration.
+    Run the complete preprocessing pipeline with form upload and JSON config.
     
-    The preprocessing_config should be a JSON string with the following structure:
-    {
-        "drop_duplicates": boolean,
-        "handle_missing": "drop" | "fill" | null,
-        "numeric_columns": ["col1", "col2"] | null,
-        "categorical_columns": ["col1", "col2"] | null,
-        "encoding_method": "label" | "onehot" | null,
-        "encoding_columns": ["col1", "col2"] | null,
-        "validate_first": boolean
-    }
+    Returns:
+        PreprocessingResponse with results and audit log
     """
-    temp_file_path = None
-    
+    temp_path = None
     try:
-        # Parse and validate configuration
-        try:
-            config_dict = json.loads(preprocessing_config)
-            config = PreprocessingRequest(**config_dict)
-            logger.info(f"Parsed preprocessing config: {config_dict}")
-        except json.JSONDecodeError as e:
-            logger.error(f"Invalid JSON in preprocessing_config: {str(e)}")
-            raise HTTPException(
-                status_code=422, 
-                detail=f"Invalid JSON format in preprocessing_config: {str(e)}"
-            )
-        except Exception as e:
-            logger.error(f"Invalid preprocessing_config schema: {str(e)}")
-            raise HTTPException(
-                status_code=422, 
-                detail=f"Invalid preprocessing_config schema: {str(e)}"
-            )
-        
         # Handle file upload
-        try:
-            df = await handle_file_upload(file)
-            # Store the temp file path for cleanup (assuming handle_file_upload returns it somehow)
-            # Note: You might need to modify handle_file_upload to return the temp path
-            logger.info(f"Successfully uploaded and processed file: {file.filename}")
-        except HTTPException as e:
-            logger.error(f"File upload failed: {str(e)}")
-            raise e
-        except Exception as e:
-            logger.error(f"Unexpected error during file upload: {str(e)}")
-            raise HTTPException(
-                status_code=422, 
-                detail=f"File upload failed: {str(e)}"
-            )
+        df, temp_path = await handle_file_upload(file)
         
-        # Convert configuration using centralized helper
-        cleaning_config, encoding_config = convert_preprocessing_config(config)
-        
-        logger.info(f"Converted configs - Cleaning: {cleaning_config is not None}, Encoding: {encoding_config is not None}")
-        
-        # Run preprocessing pipeline
-        response = preprocess_pipeline(
-            df,
-            cleaning_config=cleaning_config,
-            encoding_config=encoding_config,
-            validate_first=config.validate_first
+        # Run preprocessing pipeline with temp_path for cleanup
+        result = preprocess_pipeline(
+            df=df,
+            cleaning_config=config.cleaning_config,
+            encoding_config=config.encoding_config,
+            validate_first=config.validate_first,
+            temp_path=temp_path  # Pass temp_path for cleanup
         )
         
-        logger.info(f"Preprocessing completed successfully. Result shape: {response.num_rows}x{response.num_columns}")
+        # Create response
+        return PreprocessingResponse(
+            num_rows=result["num_rows"],
+            num_columns=result["num_columns"],
+            audit_log=result["audit_log"],
+            preview=result["preview"]
+        )
         
-        return JSONResponse(content=jsonable_encoder(response))
-        
-    except HTTPException as e:
-        logger.error(f"HTTP error during preprocessing: {str(e)}")
-        raise e
+    except DataPreprocessingError as e:
+        logger.error(f"Preprocessing error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": "DataPreprocessingError"
+        })
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error during preprocessing: {str(e)}")
-        raise HTTPException(
-            status_code=500, 
-            detail=f"Preprocessing failed: {str(e)}"
-        )
+        logger.error(f"Unexpected error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        # Cleanup temporary files
-        if temp_file_path:
-            cleanup_temp_file(temp_file_path)
+        # Cleanup temp file if processing failed
+        if temp_path:
+            try:
+                cleanup_temp_file(temp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp file {temp_path}: {cleanup_error}")
 
-# Alternative endpoint using JSON body (bonus implementation)
-@router.post(
-    "/run-json",
-    response_model=PreprocessingResponse,
-    summary="Run preprocessing with JSON config (alternative endpoint)",
-    description="Alternative endpoint that accepts JSON configuration directly in request body along with file."
-)
+
+@router.post("/json", response_model=PreprocessingResponse)
 async def run_preprocessing_json(
-    file: UploadFile = File(..., description="CSV or Excel file to preprocess"),
-    config: PreprocessingRequest = Body(..., description="Preprocessing configuration")
+    config: PreprocessingRequest,
+    file: UploadFile = File(...)
 ):
     """
-    Alternative endpoint that accepts JSON configuration directly in the request body.
-    This provides better type safety and documentation but requires clients to structure
-    their requests differently (not standard multipart form with file + JSON string).
-    """
-    temp_file_path = None
+    Run the complete preprocessing pipeline with JSON config and file upload.
     
+    Returns:
+        PreprocessingResponse with results and audit log
+    """
+    temp_path = None
     try:
-        logger.info(f"Processing file with JSON config: {config.dict()}")
-        
         # Handle file upload
-        df = await handle_file_upload(file)
-        logger.info(f"Successfully uploaded and processed file: {file.filename}")
+        df, temp_path = await handle_file_upload(file)
         
-        # Convert configuration
-        cleaning_config, encoding_config = convert_preprocessing_config(config)
-        
-        # Run preprocessing pipeline  
-        response = preprocess_pipeline(
-            df,
-            cleaning_config=cleaning_config,
-            encoding_config=encoding_config,
-            validate_first=config.validate_first
+        # Run preprocessing pipeline with temp_path for cleanup
+        result = preprocess_pipeline(
+            df=df,
+            cleaning_config=config.cleaning_config,
+            encoding_config=config.encoding_config,
+            validate_first=config.validate_first,
+            temp_path=temp_path  # Pass temp_path for cleanup
         )
         
-        logger.info(f"Preprocessing completed successfully. Result shape: {response.num_rows}x{response.num_columns}")
+        # Create response
+        return PreprocessingResponse(
+            num_rows=result["num_rows"],
+            num_columns=result["num_columns"],
+            audit_log=result["audit_log"],
+            preview=result["preview"]
+        )
         
-        return response
-        
-    except HTTPException as e:
-        logger.error(f"HTTP error during JSON preprocessing: {str(e)}")
-        raise e
+    except DataPreprocessingError as e:
+        logger.error(f"Preprocessing error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": "DataPreprocessingError"
+        })
+        raise HTTPException(status_code=422, detail=str(e))
     except Exception as e:
-        logger.error(f"Unexpected error during JSON preprocessing: {str(e)}")
-        raise HTTPException(
-            status_code=500,
-            detail=f"Preprocessing failed: {str(e)}"
-        )
+        logger.error(f"Unexpected error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
     finally:
-        if temp_file_path:
-            cleanup_temp_file(temp_file_path)
+        # Cleanup temp file if processing failed
+        if temp_path:
+            try:
+                cleanup_temp_file(temp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp file {temp_path}: {cleanup_error}")
+
+
+@router.post("/validate", response_model=ValidationReport)
+async def validate_data(file: UploadFile = File(...)):
+    """
+    Validate uploaded data without processing.
+    
+    Returns:
+        ValidationReport with detailed validation results
+    """
+    temp_path = None
+    try:
+        df, temp_path = await handle_file_upload(file)
+        
+        # Validate the data
+        service = DataPreprocessingService()
+        validation_report = service.validate_data(df)
+        
+        return validation_report
+        
+    except DataPreprocessingError as e:
+        logger.error(f"Validation error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": "DataPreprocessingError"
+        })
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        # Cleanup temp file if validation failed
+        if temp_path:
+            try:
+                cleanup_temp_file(temp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp file {temp_path}: {cleanup_error}")
+
+
+@router.post("/clean", response_model=Dict[str, Any])
+async def clean_data(
+    file: UploadFile = File(...),
+    cleaning_config: CleaningConfig = Depends()
+):
+    """
+    Clean data with specified configuration.
+    
+    Returns:
+        Dict with cleaning results and audit log
+    """
+    temp_path = None
+    try:
+        df, temp_path = await handle_file_upload(file)
+        
+        # Clean the data
+        service = DataPreprocessingService()
+        cleaning_result = service.clean_data(df, cleaning_config)
+        
+        return {
+            "success": True,
+            "original_shape": cleaning_result.original_shape,
+            "final_shape": cleaning_result.final_shape,
+            "rows_removed": cleaning_result.num_rows_removed,
+            "columns_removed": cleaning_result.num_columns_removed,
+            "cleaning_actions": cleaning_result.cleaning_actions,
+            "preview": cleaning_result.data.head().to_dict('records')
+        }
+        
+    except DataPreprocessingError as e:
+        logger.error(f"Cleaning error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": "DataPreprocessingError"
+        })
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        # Cleanup temp file if processing failed
+        if temp_path:
+            try:
+                cleanup_temp_file(temp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp file {temp_path}: {cleanup_error}")
+
+
+@router.post("/encode", response_model=Dict[str, Any])
+async def encode_data(
+    file: UploadFile = File(...),
+    encoding_config: EncodingConfig = Depends()
+):
+    """
+    Encode data with specified configuration.
+    
+    Returns:
+        Dict with encoding results and audit log
+    """
+    temp_path = None
+    try:
+        df, temp_path = await handle_file_upload(file)
+        
+        # Encode the data
+        service = DataPreprocessingService()
+        encoding_result = service.encode_data(df, encoding_config)
+        
+        return {
+            "success": True,
+            "original_shape": encoding_result.original_shape,
+            "final_shape": encoding_result.final_shape,
+            "encoders_used": encoding_result.encoders_used,
+            "encoding_actions": encoding_result.encoding_actions,
+            "preview": encoding_result.data.head().to_dict('records')
+        }
+        
+    except DataPreprocessingError as e:
+        logger.error(f"Encoding error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": "DataPreprocessingError"
+        })
+        raise HTTPException(status_code=422, detail=str(e))
+    except Exception as e:
+        logger.error(f"Unexpected error: {str(e)}", extra={
+            "filename": file.filename,
+            "error_type": type(e).__name__
+        }, exc_info=True)
+        raise HTTPException(status_code=500, detail="Internal server error")
+    finally:
+        # Cleanup temp file if processing failed
+        if temp_path:
+            try:
+                cleanup_temp_file(temp_path)
+            except Exception as cleanup_error:
+                logger.warning(f"Failed to cleanup temp file {temp_path}: {cleanup_error}")

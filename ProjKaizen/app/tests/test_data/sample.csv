@@ -1,0 +1,12 @@
+id,name,category,value,active,date
+1,Alice,A,10.5,True,2023-01-15
+2,Bob,B,20.0,False,2023-02-20
+2,Bob,B,20.0,False,2023-02-20
+3,Charlie,A,,True,2023-03-10
+4,,C,40.2,True,2023-04-05
+5,Eve,A,50.1,False,2023-05-12
+6,Frank,B,60.3,True,2023-06-18
+7,Grace,C,70.4,False,2023-07-25
+8,Henry,A,80.5,True,2023-08-30
+9,Ivy,B,90.6,False,2023-09-14
+10,Jack,C,100.7,True,2023-10-22

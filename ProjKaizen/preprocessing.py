@@ -7,8 +7,8 @@ from pathlib import Path
 from fastapi import UploadFile
 from sklearn.preprocessing import LabelEncoder
 
-from ..utils.file_io import save_temp_file
-from ..schemas.preprocess import (
+from app.utils.file_io import save_temp_file
+from app.schemas.preprocess import (
     CleaningConfig, 
     EncodingConfig, 
     CleanedDataResponse, 

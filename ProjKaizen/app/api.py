@@ -2,6 +2,7 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from app.routers import preprocess  # adjust if not using 'app' prefix
+from app.routers import transformation
 from app.middlewares.rate_limiting import RateLimitMiddleware  # optional
 
 app = FastAPI(
@@ -24,6 +25,7 @@ app.add_middleware(
 
 # Register routers
 app.include_router(preprocess.router, prefix="/preprocess", tags=["Preprocessing"])
+app.include_router(transformation.router, prefix="/transform", tags=["Transformation"])
 
 # Health check
 @app.get("/health", tags=["System"])

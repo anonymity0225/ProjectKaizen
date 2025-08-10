@@ -1,5 +1,6 @@
 # Pydantic schemas for preprocessing service
-from pydantic import BaseModel, Field, validator
+# Enhanced Pydantic schemas with enterprise-grade validation and documentation
+from pydantic import BaseModel, Field, validator, root_validator
 from typing import Dict, List, Any, Optional, Union, Tuple, Literal
 
 
@@ -100,14 +101,12 @@ class ValidationReport(BaseModel):
     """Report from data validation step."""
     
     is_valid: bool = Field(description="Whether the dataset passed all validation checks")
-    issues: List[str] = Field(description="List of specific validation issues found in the dataset")
-    recommendations: List[str] = Field(description="Actionable recommendations to resolve identified issues")
-    num_rows: int = Field(description="Total number of rows in the dataset")
-    num_columns: int = Field(description="Total number of columns in the dataset")
-    missing_values_summary: Dict[str, Dict[str, Union[int, float]]] = Field(
-        description="Per-column summary of missing values. Each column contains count and percentage of missing values"
-    )
-    duplicate_rows: int = Field(description="Number of duplicate rows detected in the dataset")
+    issues: Dict[str, Any] = Field(description="Dictionary of validation issues found in the dataset")
+    warnings: List[str] = Field(description="List of warnings found during validation")
+    row_count: int = Field(description="Total number of rows in the dataset")
+    column_count: int = Field(description="Total number of columns in the dataset")
+    memory_usage_mb: float = Field(description="Memory usage of the dataset in MB")
+    validation_duration: float = Field(description="Time taken for validation in seconds")
 
 
 class CleanedDataResponse(BaseModel):
