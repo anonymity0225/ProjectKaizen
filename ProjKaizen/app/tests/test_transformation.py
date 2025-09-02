@@ -2,8 +2,9 @@ import pytest
 import pandas as pd
 import numpy as np
 from fastapi.testclient import TestClient
-from unittest.mock import Mock, patch
+from unittest.mock import Mock, patch, MagicMock
 import json
+import time
 
 from app.services.transformation import (
     extract_date_components,
@@ -25,9 +26,24 @@ from app.schemas.transformation import (
     TextPreprocessingRequest, TextPreprocessingResponse,
     TFIDFRequest, TFIDFResponse,
     PCATransformRequest, PCATransformResponse,
+    BatchTransformRequest, BatchTransformResponse,
+    HistorySummaryResponse,
     BaseTransformationResponse
 )
 from app.api import app
+
+
+# Mock JWT verification for tests
+def mock_verify_token():
+    """Mock JWT verification that always passes."""
+    return {"user_id": "test_user", "email": "test@example.com"}
+
+
+@pytest.fixture(autouse=True)
+def mock_auth():
+    """Automatically mock JWT verification for all tests."""
+    with patch('app.dependencies.verify_token', return_value=mock_verify_token()):
+        yield
 
 
 # Fixtures
@@ -51,7 +67,6 @@ def client():
 @pytest.fixture
 def auth_headers():
     """Valid JWT headers for protected routes."""
-    # Mock JWT token - in real implementation, this would be a valid token
     return {"Authorization": "Bearer valid_jwt_token"}
 
 
@@ -100,6 +115,7 @@ class TestDateExtraction:
         assert "date_col_day" in df.columns
         assert "date_col_weekday" in df.columns
         assert metadata["status"] == "success"
+        assert metadata["method"] == "date_component_extraction"
         assert metadata["added_columns"] == ["date_col_year", "date_col_month", "date_col_day", "date_col_weekday"]
         assert metadata["transformed_columns"] == ["date_col"]
         
@@ -150,8 +166,8 @@ class TestNumericScaling:
         df, metadata = scale_numeric(numeric_df, "feature1", method, **kwargs)
         
         assert metadata["status"] == "success"
+        assert metadata["method"] == f"numeric_scaling_{method}"
         assert metadata["transformed_columns"] == ["feature1"]
-        assert metadata["method"] == method
         
         scaled_values = df["feature1"].values
         if method == "minmax":
@@ -167,6 +183,19 @@ class TestNumericScaling:
         elif method == "log":
             # All values should be positive after log transformation
             assert all(val > 0 for val in scaled_values if not pd.isna(val))
+    
+    def test_scale_numeric_multiple_columns(self, numeric_df):
+        """Test scaling multiple columns."""
+        df, metadata = scale_numeric(numeric_df, ["feature1", "feature2"], "minmax")
+        
+        assert metadata["status"] == "success"
+        assert metadata["method"] == "numeric_scaling_minmax"
+        assert set(metadata["transformed_columns"]) == {"feature1", "feature2"}
+        
+        for col in ["feature1", "feature2"]:
+            scaled_values = df[col].values
+            assert scaled_values.min() == pytest.approx(0.0, rel=1e-10)
+            assert scaled_values.max() == pytest.approx(1.0, rel=1e-10)
     
     def test_scale_numeric_invalid_column(self, numeric_df):
         """Test scaling with invalid column."""
@@ -197,13 +226,14 @@ class TestCategoricalEncoding:
         df, metadata = encode_categorical(categorical_df, "color", method)
         
         assert metadata["status"] == "success"
+        assert metadata["method"] == f"categorical_encoding_{method}"
         assert metadata["transformed_columns"] == ["color"]
-        assert metadata["method"] == method
         
         if method == "onehot":
             # Check that one-hot columns were created
             onehot_cols = [col for col in df.columns if col.startswith("color_")]
             assert len(onehot_cols) > 0
+            assert len(metadata["added_columns"]) > 0
             # Check that original column was dropped
             assert "color" not in df.columns
         elif method == "label":
@@ -218,14 +248,25 @@ class TestCategoricalEncoding:
             # Check that frequencies are between 0 and 1
             assert all(0 <= val <= 1 for val in df["color"])
     
+    def test_encode_categorical_multiple_columns(self, categorical_df):
+        """Test encoding multiple columns."""
+        df, metadata = encode_categorical(categorical_df, ["color", "size"], "label")
+        
+        assert metadata["status"] == "success"
+        assert metadata["method"] == "categorical_encoding_label"
+        assert set(metadata["transformed_columns"]) == {"color", "size"}
+        
+        for col in ["color", "size"]:
+            assert df[col].dtype in [np.int64, np.int32]
+    
     def test_encode_categorical_custom(self, categorical_df):
         """Test custom encoding."""
         custom_mapping = {"red": 1, "blue": 2, "green": 3}
         df, metadata = encode_categorical(categorical_df, "color", "custom", custom_mapping)
         
         assert metadata["status"] == "success"
+        assert metadata["method"] == "categorical_encoding_custom"
         assert metadata["transformed_columns"] == ["color"]
-        assert metadata["method"] == "custom"
         # Check that custom mapping was applied
         assert set(df["color"].unique()) == set(custom_mapping.values())
     
@@ -251,8 +292,8 @@ class TestTextPreprocessing:
         df, metadata = tokenize_text(text_df, "text", method)
         
         assert metadata["status"] == "success"
+        assert metadata["method"] == f"text_preprocessing_{method}"
         assert metadata["transformed_columns"] == ["text"]
-        assert metadata["method"] == method
         
         # Check that text was processed
         assert all(isinstance(text, str) for text in df["text"])
@@ -282,11 +323,13 @@ class TestTFIDFVectorization:
         df, metadata = apply_tfidf_vectorization(text_df, "text", max_features=10)
         
         assert metadata["status"] == "success"
+        assert metadata["method"] == "tfidf_vectorization"
         assert metadata["transformed_columns"] == ["text"]
         # Check that TF-IDF columns were created
         tfidf_cols = [col for col in df.columns if col.startswith("tfidf_")]
         assert len(tfidf_cols) <= 10
         assert len(tfidf_cols) > 0
+        assert len(metadata["added_columns"]) > 0
         # Check that original text column was dropped
         assert "text" not in df.columns
     
@@ -325,21 +368,28 @@ class TestPCATransformation:
         df, metadata = apply_pca(numeric_df, n_components=1, columns=["feature1", "feature2"])
         
         assert metadata["status"] == "success"
+        assert metadata["method"] == "pca_transformation"
+        assert metadata["n_components"] == 1
+        assert set(metadata["transformed_columns"]) == {"feature1", "feature2"}
         # Check that PCA column was created
         pca_cols = [col for col in df.columns if col.startswith("PC")]
         assert len(pca_cols) == 1
         assert "PC1" in df.columns
+        assert len(metadata["added_columns"]) == 1
     
     def test_apply_pca_multiple_components(self, numeric_df):
         """Test PCA with multiple components."""
         df, metadata = apply_pca(numeric_df, n_components=2, columns=["feature1", "feature2", "feature3"])
         
         assert metadata["status"] == "success"
+        assert metadata["method"] == "pca_transformation"
+        assert metadata["n_components"] == 2
         # Check that PCA columns were created
         pca_cols = [col for col in df.columns if col.startswith("PC")]
         assert len(pca_cols) == 2
         assert "PC1" in df.columns
         assert "PC2" in df.columns
+        assert len(metadata["added_columns"]) == 2
     
     def test_apply_pca_too_many_components(self, numeric_df):
         """Test PCA with more components than features."""
@@ -360,14 +410,16 @@ class TestCustomUserFunction:
     def test_apply_custom_user_function_success(self, sample_df):
         """Test custom user function application."""
         def sample_func(df: pd.DataFrame) -> pd.DataFrame:
+            df = df.copy()
             df["constant_col"] = 42
             return df
         
         df, metadata = apply_custom_user_function(sample_df, sample_func, "add_constant")
         
         assert metadata["status"] == "success"
-        assert "constant_col" in df.columns
         assert metadata["method"] == "custom_function"
+        assert metadata["function_name"] == "add_constant"
+        assert "constant_col" in df.columns
         assert all(df["constant_col"] == 42)
     
     def test_apply_custom_user_function_with_error(self, sample_df):
@@ -379,22 +431,18 @@ class TestCustomUserFunction:
             apply_custom_user_function(sample_df, error_func, "error_func")
         assert "Test error" in str(exc_info.value)
     
-    def test_apply_custom_user_function_code_injection(self, sample_df):
-        """Test potential code injection in custom function."""
-        # This should be handled safely by the function execution
-        malicious_code = """
-        import os
-        os.system('rm -rf /')
-        """
-        
-        def safe_func(df: pd.DataFrame) -> pd.DataFrame:
-            # The function should not execute malicious code from strings
-            df["safe_col"] = "safe"
+    def test_apply_custom_user_function_unsafe_code(self, sample_df):
+        """Test handling of potentially unsafe custom function."""
+        def potentially_unsafe_func(df: pd.DataFrame) -> pd.DataFrame:
+            # This function is safe but could be used to test safety measures
+            df = df.copy()
+            df["processed"] = "safe"
             return df
         
-        df, metadata = apply_custom_user_function(sample_df, safe_func, "safe_func")
+        df, metadata = apply_custom_user_function(sample_df, potentially_unsafe_func, "safe_func")
         assert metadata["status"] == "success"
-        assert "safe_col" in df.columns
+        assert "processed" in df.columns
+        assert all(df["processed"] == "safe")
 
 
 class TestBatchTransformations:
@@ -423,6 +471,19 @@ class TestBatchTransformations:
         if len(non_null_values) > 0:
             assert non_null_values.min() >= 0
             assert non_null_values.max() <= 1
+    
+    def test_apply_multiple_transformations_function_format(self, sample_df):
+        """Test batch transformations with function/args format."""
+        transformations = [
+            {"function": "scale_numeric", "args": {"column": "num_col", "method": "minmax"}},
+            {"function": "encode_categorical", "args": {"column": "cat_col", "method": "label"}}
+        ]
+        
+        df, metas = apply_multiple_transformations(sample_df, transformations)
+        
+        assert len(metas) == 2
+        assert all(meta["status"] == "success" for meta in metas)
+        assert df["cat_col"].dtype in [np.int64, np.int32]
     
     def test_apply_multiple_transformations_with_error(self, sample_df):
         """Test batch transformations with one failing."""
@@ -512,6 +573,7 @@ class TestTransformationAPI:
         assert "data" in data
         assert "metadata" in data
         assert data["metadata"]["status"] == "success"
+        assert data["metadata"]["method"] == "date_component_extraction"
         assert "date_col_year" in data["data"][0]
         assert "date_col_month" in data["data"][0]
         assert "date_col_day" in data["data"][0]
@@ -534,8 +596,9 @@ class TestTransformationAPI:
             "components": ["year"]
         }
         
-        response = client.post("/transform/date", json=payload)
-        assert response.status_code == 401
+        with patch('app.dependencies.verify_token', side_effect=Exception("Unauthorized")):
+            response = client.post("/transform/date", json=payload)
+            assert response.status_code == 401
     
     @pytest.mark.parametrize("method", ["minmax", "zscore", "log"])
     def test_scale_endpoint_methods(self, client, auth_headers, method):
@@ -558,7 +621,26 @@ class TestTransformationAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["metadata"]["status"] == "success"
-        assert data["metadata"]["method"] == method
+        assert data["metadata"]["method"] == f"numeric_scaling_{method}"
+    
+    def test_scale_endpoint_multiple_columns(self, client, auth_headers):
+        """Test scaling endpoint with multiple columns."""
+        payload = {
+            "data": [
+                {"num_col1": 1.0, "num_col2": 10.0},
+                {"num_col1": 2.0, "num_col2": 20.0},
+                {"num_col1": 3.0, "num_col2": 30.0}
+            ],
+            "column": ["num_col1", "num_col2"],
+            "method": "minmax"
+        }
+        
+        response = client.post("/transform/scale", json=payload, headers=auth_headers)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["metadata"]["status"] == "success"
+        assert set(data["metadata"]["transformed_columns"]) == {"num_col1", "num_col2"}
     
     def test_encode_endpoint_success(self, client, auth_headers):
         """Test categorical encoding endpoint."""
@@ -577,7 +659,26 @@ class TestTransformationAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["metadata"]["status"] == "success"
-        assert data["metadata"]["method"] == "label"
+        assert data["metadata"]["method"] == "categorical_encoding_label"
+    
+    def test_encode_endpoint_multiple_columns(self, client, auth_headers):
+        """Test encoding endpoint with multiple columns."""
+        payload = {
+            "data": [
+                {"cat_col1": "A", "cat_col2": "X"},
+                {"cat_col1": "B", "cat_col2": "Y"},
+                {"cat_col1": "A", "cat_col2": "X"}
+            ],
+            "column": ["cat_col1", "cat_col2"],
+            "method": "label"
+        }
+        
+        response = client.post("/transform/encode", json=payload, headers=auth_headers)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["metadata"]["status"] == "success"
+        assert set(data["metadata"]["transformed_columns"]) == {"cat_col1", "cat_col2"}
     
     def test_text_preprocessing_endpoint_success(self, client, auth_headers):
         """Test text preprocessing endpoint."""
@@ -595,7 +696,7 @@ class TestTransformationAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["metadata"]["status"] == "success"
-        assert data["metadata"]["method"] == "stemming"
+        assert data["metadata"]["method"] == "text_preprocessing_stemming"
     
     def test_tfidf_endpoint_success(self, client, auth_headers):
         """Test TF-IDF vectorization endpoint."""
@@ -614,6 +715,7 @@ class TestTransformationAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["metadata"]["status"] == "success"
+        assert data["metadata"]["method"] == "tfidf_vectorization"
         # Check that TF-IDF columns were created
         tfidf_cols = [col for col in data["data"][0].keys() if col.startswith("tfidf_")]
         assert len(tfidf_cols) > 0
@@ -636,7 +738,26 @@ class TestTransformationAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["metadata"]["status"] == "success"
+        assert data["metadata"]["method"] == "pca_transformation"
+        assert data["metadata"]["n_components"] == 1
         assert "PC1" in data["data"][0]
+    
+    def test_pca_endpoint_invalid_components(self, client, auth_headers):
+        """Test PCA endpoint with too many components."""
+        payload = {
+            "data": [
+                {"feature1": 1.0, "feature2": 10.0},
+                {"feature1": 2.0, "feature2": 20.0}
+            ],
+            "n_components": 5,  # More than available features
+            "columns": ["feature1", "feature2"]
+        }
+        
+        response = client.post("/transform/pca", json=payload, headers=auth_headers)
+        
+        assert response.status_code == 400
+        data = response.json()
+        assert "n_components cannot exceed" in data["detail"]
     
     def test_custom_function_endpoint_success(self, client, auth_headers):
         """Test custom function endpoint."""
@@ -645,7 +766,7 @@ class TestTransformationAPI:
                 {"num_col": 1.0, "id": 1},
                 {"num_col": 2.0, "id": 2}
             ],
-            "function_code": "def transform(df): df['doubled'] = df['num_col'] * 2; return df",
+            "function_code": "def transform(df): df = df.copy(); df['doubled'] = df['num_col'] * 2; return df",
             "function_name": "double_values"
         }
         
@@ -654,8 +775,25 @@ class TestTransformationAPI:
         assert response.status_code == 200
         data = response.json()
         assert data["metadata"]["status"] == "success"
+        assert data["metadata"]["method"] == "custom_function"
+        assert data["metadata"]["function_name"] == "double_values"
         assert "doubled" in data["data"][0]
         assert data["data"][0]["doubled"] == 2.0
+    
+    def test_custom_function_endpoint_unsafe_code(self, client, auth_headers):
+        """Test custom function endpoint with potentially unsafe code."""
+        payload = {
+            "data": [
+                {"num_col": 1.0, "id": 1}
+            ],
+            "function_code": "import os; def transform(df): os.system('echo test'); return df",
+            "function_name": "unsafe_function"
+        }
+        
+        response = client.post("/transform/custom", json=payload, headers=auth_headers)
+        
+        # Should either reject unsafe code or handle it safely
+        assert response.status_code in [400, 500]
     
     def test_batch_transformation_endpoint_success(self, client, auth_headers):
         """Test batch transformation endpoint."""
@@ -679,6 +817,46 @@ class TestTransformationAPI:
         assert len(data["metadata"]) == 2  # Two transformations
         assert all(meta["status"] == "success" for meta in data["metadata"])
         assert "date_col_year" in data["data"][0]
+    
+    def test_batch_transformation_function_format(self, client, auth_headers):
+        """Test batch transformation with function/args format."""
+        payload = {
+            "data": [
+                {"num_col": 1.0, "cat_col": "A"},
+                {"num_col": 2.0, "cat_col": "B"}
+            ],
+            "transformations": [
+                {"function": "scale_numeric", "args": {"column": "num_col", "method": "minmax"}},
+                {"function": "encode_categorical", "args": {"column": "cat_col", "method": "label"}}
+            ]
+        }
+        
+        response = client.post("/transform/batch", json=payload, headers=auth_headers)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["metadata"]) == 2
+        assert all(meta["status"] == "success" for meta in data["metadata"])
+    
+    def test_batch_transformation_unknown_action(self, client, auth_headers):
+        """Test batch transformation with unknown action."""
+        payload = {
+            "data": [
+                {"num_col": 1.0},
+                {"num_col": 2.0}
+            ],
+            "transformations": [
+                {"action": "unknown_transformation", "params": {"column": "num_col"}}
+            ]
+        }
+        
+        response = client.post("/transform/batch", json=payload, headers=auth_headers)
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["metadata"]) == 1
+        assert data["metadata"][0]["status"] == "error"
+        assert "Unknown transformation action" in data["metadata"][0]["error"]
     
     def test_get_history_endpoint_success(self, client, auth_headers):
         """Test get transformation history endpoint."""
@@ -726,7 +904,6 @@ class TestTransformationAPI:
     
     def test_endpoints_with_invalid_auth(self, client):
         """Test endpoints with invalid authorization."""
-        invalid_headers = {"Authorization": "Bearer invalid_token"}
         payload = {"data": [{"col": "value"}]}
         
         endpoints = [
@@ -743,14 +920,15 @@ class TestTransformationAPI:
         ]
         
         for endpoint, method in endpoints:
-            if method == "POST":
-                response = client.post(endpoint, json=payload, headers=invalid_headers)
-            elif method == "GET":
-                response = client.get(endpoint, headers=invalid_headers)
-            elif method == "DELETE":
-                response = client.delete(endpoint, headers=invalid_headers)
-            
-            assert response.status_code == 401
+            with patch('app.dependencies.verify_token', side_effect=Exception("Unauthorized")):
+                if method == "POST":
+                    response = client.post(endpoint, json=payload)
+                elif method == "GET":
+                    response = client.get(endpoint)
+                elif method == "DELETE":
+                    response = client.delete(endpoint)
+                
+                assert response.status_code == 401
 
 
 class TestEdgeCases:
@@ -790,7 +968,7 @@ class TestEdgeCases:
         }
         
         response = client.post("/transform/date", json=payload, headers=auth_headers)
-        assert response.status_code == 400 or response.status_code == 422
+        assert response.status_code in [400, 422]
     
     def test_missing_values_handling(self, client, auth_headers):
         """Test handling of missing values in transformations."""
@@ -905,6 +1083,78 @@ class TestEdgeCases:
         assert all(isinstance(val, int) for val in encoded_values)
 
 
+class TestPerformance:
+    """Test cases for performance with large datasets."""
+    
+    def test_large_dataset_performance(self, client, auth_headers):
+        """Test transformation performance with large dataset (~10k rows)."""
+        # Create a large dataset
+        large_data = []
+        for i in range(10000):
+            large_data.append({
+                "num_col": float(i % 1000),
+                "cat_col": ["A", "B", "C", "D", "E"][i % 5],
+                "text_col": f"Sample text number {i}",
+                "id": i
+            })
+        
+        # Test numeric scaling performance
+        payload = {
+            "data": large_data,
+            "column": "num_col",
+            "method": "minmax"
+        }
+        
+        start_time = time.time()
+        response = client.post("/transform/scale", json=payload, headers=auth_headers)
+        end_time = time.time()
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert data["metadata"]["status"] == "success"
+        assert len(data["data"]) == 10000
+        
+        # Should complete within reasonable time (2 seconds)
+        execution_time = end_time - start_time
+        assert execution_time < 2.0, f"Transformation took {execution_time:.2f} seconds, expected < 2.0"
+    
+    def test_batch_transformation_performance(self, client, auth_headers):
+        """Test batch transformation performance."""
+        # Create moderate-sized dataset for batch operations
+        data_size = 5000
+        large_data = []
+        for i in range(data_size):
+            large_data.append({
+                "date_col": f"202{i % 3}-{(i % 12) + 1:02d}-{(i % 28) + 1:02d}",
+                "num_col": float(i % 100),
+                "cat_col": ["Type_A", "Type_B", "Type_C"][i % 3],
+                "id": i
+            })
+        
+        payload = {
+            "data": large_data,
+            "transformations": [
+                {"action": "extract_date_components", "params": {"column": "date_col", "components": ["year", "month"]}},
+                {"action": "scale_numeric", "params": {"column": "num_col", "method": "minmax"}},
+                {"action": "encode_categorical", "params": {"column": "cat_col", "method": "label"}}
+            ]
+        }
+        
+        start_time = time.time()
+        response = client.post("/transform/batch", json=payload, headers=auth_headers)
+        end_time = time.time()
+        
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["metadata"]) == 3
+        assert all(meta["status"] == "success" for meta in data["metadata"])
+        assert len(data["data"]) == data_size
+        
+        # Should complete within reasonable time (3 seconds for batch)
+        execution_time = end_time - start_time
+        assert execution_time < 3.0, f"Batch transformation took {execution_time:.2f} seconds, expected < 3.0"
+
+
 class TestIntegrationScenarios:
     """Integration tests for real-world scenarios."""
     
@@ -1004,6 +1254,82 @@ class TestIntegrationScenarios:
         history_response = client.get("/transform/history", headers=auth_headers)
         history_data = history_response.json()
         assert history_data["total_operations"] >= 5
+
+
+class TestSchemaValidation:
+    """Test cases for request/response schema validation."""
+    
+    def test_date_extraction_schema_validation(self, client, auth_headers):
+        """Test date extraction request schema validation."""
+        # Valid request
+        valid_payload = {
+            "data": [{"date_col": "2020-01-01"}],
+            "column": "date_col",
+            "components": ["year", "month"]
+        }
+        response = client.post("/transform/date", json=valid_payload, headers=auth_headers)
+        assert response.status_code == 200
+        
+        # Invalid request - missing required field
+        invalid_payload = {
+            "data": [{"date_col": "2020-01-01"}],
+            "column": "date_col"
+            # Missing components
+        }
+        response = client.post("/transform/date", json=invalid_payload, headers=auth_headers)
+        assert response.status_code == 422
+    
+    def test_scaling_schema_validation(self, client, auth_headers):
+        """Test scaling request schema validation."""
+        # Valid request
+        valid_payload = {
+            "data": [{"num_col": 1.0}],
+            "column": "num_col",
+            "method": "minmax"
+        }
+        response = client.post("/transform/scale", json=valid_payload, headers=auth_headers)
+        assert response.status_code == 200
+        
+        # Invalid method
+        invalid_payload = {
+            "data": [{"num_col": 1.0}],
+            "column": "num_col",
+            "method": "invalid_method"
+        }
+        response = client.post("/transform/scale", json=invalid_payload, headers=auth_headers)
+        assert response.status_code == 422
+    
+    def test_batch_transformation_schema_validation(self, client, auth_headers):
+        """Test batch transformation request schema validation."""
+        # Valid request with action/params format
+        valid_payload = {
+            "data": [{"num_col": 1.0}],
+            "transformations": [
+                {"action": "scale_numeric", "params": {"column": "num_col", "method": "minmax"}}
+            ]
+        }
+        response = client.post("/transform/batch", json=valid_payload, headers=auth_headers)
+        assert response.status_code == 200
+        
+        # Valid request with function/args format
+        valid_payload_2 = {
+            "data": [{"num_col": 1.0}],
+            "transformations": [
+                {"function": "scale_numeric", "args": {"column": "num_col", "method": "minmax"}}
+            ]
+        }
+        response = client.post("/transform/batch", json=valid_payload_2, headers=auth_headers)
+        assert response.status_code == 200
+        
+        # Invalid request - malformed transformation
+        invalid_payload = {
+            "data": [{"num_col": 1.0}],
+            "transformations": [
+                {"invalid_key": "scale_numeric"}
+            ]
+        }
+        response = client.post("/transform/batch", json=invalid_payload, headers=auth_headers)
+        assert response.status_code == 422
 
 
 # Cleanup fixture

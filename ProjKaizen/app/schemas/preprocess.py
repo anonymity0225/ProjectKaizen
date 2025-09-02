@@ -1,327 +1,543 @@
-# Pydantic schemas for preprocessing service
-# Enhanced Pydantic schemas with enterprise-grade validation and documentation
-from pydantic import BaseModel, Field, validator, root_validator
-from typing import Dict, List, Any, Optional, Union, Tuple, Literal
+from typing import Dict, List, Any, Optional, Literal
+from pydantic import BaseModel, Field, ConfigDict, field_validator, model_validator
+import pandas as pd
 
 
-class PreviewRow(BaseModel):
-    """Single row of data for preview purposes."""
+class CleanlinessReport(BaseModel):
+    """Report on data quality and cleanliness metrics."""
+    model_config = ConfigDict(extra="forbid")
     
-    class Config:
-        extra = "allow"  # Allow dynamic fields based on dataset columns
-        schema_extra = {
+    total_rows: int = Field(..., description="Total number of rows in the dataset")
+    total_columns: int = Field(..., description="Total number of columns in the dataset")
+    missing_per_column: Dict[str, float] = Field(
+        ..., 
+        description="Missing value ratio per column (0.0 to 1.0)"
+    )
+    duplicate_rows: int = Field(..., description="Number of duplicate rows in the dataset")
+    column_types: Dict[str, str] = Field(..., description="Data types for each column")
+    categorical_cardinality: Dict[str, int] = Field(
+        ..., 
+        description="Number of unique values for categorical columns"
+    )
+
+    @field_validator('missing_per_column')
+    @classmethod
+    def validate_missing_ratios(cls, v):
+        """Validate that all missing ratios are between 0 and 1."""
+        for column, ratio in v.items():
+            if not 0.0 <= ratio <= 1.0:
+                raise ValueError(f"Missing ratio for column '{column}' must be between 0.0 and 1.0, got {ratio}")
+        return v
+
+    @field_validator('duplicate_rows')
+    @classmethod
+    def validate_duplicates_non_negative(cls, v):
+        """Validate that duplicate rows count is non-negative."""
+        if v < 0:
+            raise ValueError("Duplicate rows count cannot be negative")
+        return v
+
+    @model_validator(mode='after')
+    def validate_consistency(self):
+        """Validate consistency between reported metrics."""
+        if self.duplicate_rows > self.total_rows:
+            raise ValueError("Duplicate rows cannot exceed total rows")
+        return self
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
             "example": {
-                "id": 1,
-                "name": "John Doe",
-                "age": 30,
-                "salary": 50000.0,
-                "department": "Engineering"
-            }
-        }
-
-
-class CleaningConfig(BaseModel):
-    """Configuration for data cleaning operations."""
-    
-    remove_duplicates: bool = Field(default=True, description="Remove duplicate rows from the dataset")
-    handle_missing_values: bool = Field(default=True, description="Apply missing value handling strategy")
-    missing_value_strategy: Literal[
-        "drop_rows", "drop_columns", "fill_mean", "fill_median", 
-        "fill_mode", "fill_forward", "fill_backward"
-    ] = Field(
-        default="drop_rows",
-        description="Strategy for handling missing values: drop_rows removes rows with any missing values, drop_columns removes columns exceeding missing threshold, fill_* methods impute missing values"
-    )
-    missing_threshold: float = Field(
-        default=0.5,
-        ge=0.0,
-        le=1.0,
-        description="Threshold for dropping columns with missing values (0.0 = drop if any missing, 1.0 = drop only if all missing)"
-    )
-    remove_outliers: bool = Field(default=False, description="Remove statistical outliers using Interquartile Range (IQR) method")
-    normalize_column_names: bool = Field(default=True, description="Normalize column names to lowercase with underscores for consistency")
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "remove_duplicates": True,
-                "handle_missing_values": True,
-                "missing_value_strategy": "fill_mean",
-                "missing_threshold": 0.3,
-                "remove_outliers": True,
-                "normalize_column_names": True
-            }
-        }
-
-
-class EncodingConfig(BaseModel):
-    """Configuration for data encoding operations."""
-    
-    categorical_encoding_method: Literal["label", "onehot", "target"] = Field(
-        default="label",
-        description="Method for encoding categorical variables: label (ordinal encoding), onehot (one-hot encoding), target (target mean encoding)"
-    )
-    categorical_columns: List[str] = Field(
-        default=[],
-        description="Specific categorical columns to encode. If empty, all detected categorical columns will be encoded"
-    )
-    scale_numerical: bool = Field(default=True, description="Apply feature scaling to numerical columns")
-    scaling_method: Literal["standard", "minmax", "robust"] = Field(
-        default="standard",
-        description="Method for scaling numerical features: standard (z-score normalization), minmax (0-1 scaling), robust (median and IQR scaling)"
-    )
-    numerical_columns: List[str] = Field(
-        default=[],
-        description="Specific numerical columns to scale. If empty, all detected numerical columns will be scaled"
-    )
-    target_column: Optional[str] = Field(
-        default=None,
-        description="Target column name for supervised learning. This column will be excluded from scaling and used for target encoding"
-    )
-    drop_first: bool = Field(
-        default=True,
-        description="Drop first category in one-hot encoding to avoid multicollinearity (n-1 encoding)"
-    )
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "categorical_encoding_method": "onehot",
-                "categorical_columns": ["department", "category"],
-                "scale_numerical": True,
-                "scaling_method": "standard",
-                "numerical_columns": ["age", "salary", "experience"],
-                "target_column": "performance_score",
-                "drop_first": True
-            }
-        }
-
-
-class ValidationReport(BaseModel):
-    """Report from data validation step."""
-    
-    is_valid: bool = Field(description="Whether the dataset passed all validation checks")
-    issues: Dict[str, Any] = Field(description="Dictionary of validation issues found in the dataset")
-    warnings: List[str] = Field(description="List of warnings found during validation")
-    row_count: int = Field(description="Total number of rows in the dataset")
-    column_count: int = Field(description="Total number of columns in the dataset")
-    memory_usage_mb: float = Field(description="Memory usage of the dataset in MB")
-    validation_duration: float = Field(description="Time taken for validation in seconds")
-
-
-class CleanedDataResponse(BaseModel):
-    """Response from data cleaning step."""
-    
-    data: Any = Field(description="Cleaned dataset as DataFrame (serialized to appropriate format for API response)")
-    original_shape: Tuple[int, int] = Field(description="Original dataset dimensions as (rows, columns) before cleaning")
-    final_shape: Tuple[int, int] = Field(description="Final dataset dimensions as (rows, columns) after cleaning")
-    cleaning_actions: List[str] = Field(description="Chronological list of cleaning operations performed on the dataset")
-    num_rows_removed: int = Field(description="Total number of rows removed during cleaning process")
-    num_columns_removed: int = Field(description="Total number of columns removed during cleaning process")
-    
-    class Config:
-        arbitrary_types_allowed = True
-
-
-class EncodedDataResponse(BaseModel):
-    """Response from data encoding step."""
-    
-    data: Any = Field(description="Encoded dataset as DataFrame (serialized to appropriate format for API response)")
-    original_shape: Tuple[int, int] = Field(description="Dataset dimensions as (rows, columns) before encoding")
-    final_shape: Tuple[int, int] = Field(description="Dataset dimensions as (rows, columns) after encoding")
-    encoding_actions: List[str] = Field(description="Chronological list of encoding operations performed")
-    encoders_used: List[str] = Field(description="List of column names that had encoding transformations applied")
-    scaler_used: Optional[str] = Field(description="Type of scaler applied to numerical features (e.g., 'StandardScaler', 'MinMaxScaler')")
-    
-    class Config:
-        arbitrary_types_allowed = True
-
-
-class PreprocessingRequest(BaseModel):
-    """Request for preprocessing pipeline."""
-    
-    cleaning_config: Optional[CleaningConfig] = Field(default=None, description="Data cleaning configuration. If null, cleaning step is skipped")
-    encoding_config: Optional[EncodingConfig] = Field(default=None, description="Data encoding configuration. If null, encoding step is skipped")
-    validate_first: bool = Field(default=True, description="Whether to perform data validation before preprocessing steps")
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "cleaning_config": {
-                    "remove_duplicates": True,
-                    "handle_missing_values": True,
-                    "missing_value_strategy": "fill_mean",
-                    "missing_threshold": 0.3,
-                    "remove_outliers": False,
-                    "normalize_column_names": True
+                "total_rows": 1000,
+                "total_columns": 8,
+                "missing_per_column": {
+                    "name": 0.0,
+                    "age": 0.08,
+                    "department": 0.0,
+                    "salary": 0.12,
+                    "city": 0.05
                 },
-                "encoding_config": {
-                    "categorical_encoding_method": "onehot",
-                    "categorical_columns": [],
-                    "scale_numerical": True,
-                    "scaling_method": "standard",
-                    "numerical_columns": [],
-                    "target_column": "target",
-                    "drop_first": True
-                },
-                "validate_first": True
-            }
-        }
-
-
-class PreprocessingResponse(BaseModel):
-    """Response from complete preprocessing pipeline."""
-    
-    num_rows: int = Field(description="Final number of rows after all preprocessing steps")
-    num_columns: int = Field(description="Final number of columns after all preprocessing steps")
-    audit_log: Dict[str, Any] = Field(
-        description="Comprehensive audit trail containing details of all preprocessing operations, timestamps, and parameters used"
-    )
-    preview: List[PreviewRow] = Field(description="Preview of final processed dataset showing first 5 rows")
-    intermediate_states: Optional[Dict[str, List[PreviewRow]]] = Field(
-        default=None,
-        description="Preview data after each processing step. Keys include 'after_cleaning', 'after_encoding', etc."
-    )
-
-
-class FileUploadResponse(BaseModel):
-    """Response from file upload."""
-    
-    filename: str = Field(description="Original name of the uploaded file")
-    file_size: int = Field(description="Size of the uploaded file in bytes")
-    num_rows: int = Field(description="Number of data rows in the uploaded dataset")
-    num_columns: int = Field(description="Number of columns in the uploaded dataset")
-    column_names: List[str] = Field(description="List of all column names found in the dataset")
-    data_types: Dict[str, str] = Field(
-        description="Mapping of column names to their detected data types (e.g., 'int64', 'float64', 'object')"
-    )
-    preview: List[PreviewRow] = Field(description="Preview showing first 5 rows of the uploaded dataset")
-    
-    class Config:
-        schema_extra = {
-            "example": {
-                "filename": "employee_data.csv",
-                "file_size": 2048576,
-                "num_rows": 1000,
-                "num_columns": 8,
-                "column_names": ["id", "name", "age", "department", "salary", "hire_date", "performance_score", "active"],
-                "data_types": {
-                    "id": "int64",
+                "duplicate_rows": 15,
+                "column_types": {
                     "name": "object",
                     "age": "int64",
                     "department": "object",
                     "salary": "float64",
-                    "hire_date": "object",
-                    "performance_score": "float64",
-                    "active": "bool"
+                    "city": "object"
                 },
-                "preview": [
+                "categorical_cardinality": {
+                    "department": 5,
+                    "city": 12
+                }
+            }
+        }
+    )
+
+
+class ValidationReport(BaseModel):
+    """Report from data validation process."""
+    model_config = ConfigDict(extra="forbid")
+    
+    valid: bool = Field(..., description="Whether the data passes all validation checks")
+    errors: List[str] = Field(
+        default_factory=list, 
+        description="List of validation errors that prevent processing"
+    )
+    warnings: List[str] = Field(
+        default_factory=list, 
+        description="List of non-critical warnings about the data"
+    )
+    details: Dict[str, Any] = Field(
+        default_factory=dict, 
+        description="Additional validation details and metadata"
+    )
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "valid": False,
+                "errors": [
+                    "Dataset exceeds maximum row limit (1,000,000)",
+                    "Column 'invalid_col' contains only null values"
+                ],
+                "warnings": [
+                    "High cardinality detected in column 'id' (10,000 unique values)",
+                    "Large file size: 150.3MB may impact performance"
+                ],
+                "details": {
+                    "max_rows_exceeded_by": 50000,
+                    "null_only_columns": ["invalid_col"],
+                    "high_cardinality_columns": {
+                        "id": {"unique_count": 10000, "total_count": 10000}
+                    }
+                }
+            }
+        }
+    )
+
+
+class CleaningConfig(BaseModel):
+    """Configuration for data cleaning operations."""
+    model_config = ConfigDict(extra="forbid")
+    
+    drop_duplicates: bool = Field(
+        default=True, 
+        description="Whether to remove duplicate rows from the dataset"
+    )
+    
+    missing_strategy: Literal["mean", "median", "mode", "constant", "drop"] = Field(
+        default="mean",
+        description="Strategy for handling missing values"
+    )
+    
+    missing_constant_value: Optional[str] = Field(
+        default=None,
+        description="Constant value to use when missing_strategy is 'constant'"
+    )
+    
+    outlier_handling: Literal["none", "iqr", "zscore"] = Field(
+        default="none",
+        description="Method for detecting and handling outliers"
+    )
+    
+    outlier_threshold: float = Field(
+        default=3.0,
+        ge=1.0,
+        le=5.0,
+        description="Threshold for outlier detection (Z-score or IQR multiplier)"
+    )
+    
+    outlier_action: Literal["remove", "cap", "flag"] = Field(
+        default="cap",
+        description="Action to take when outliers are detected"
+    )
+    
+    normalize_column_names: bool = Field(
+        default=True,
+        description="Whether to normalize column names (lowercase, underscore)"
+    )
+    
+    remove_empty_columns: bool = Field(
+        default=True,
+        description="Whether to remove columns that are entirely empty"
+    )
+    
+    @model_validator(mode='after')
+    def validate_missing_constant(self):
+        """Validate that constant value is provided when strategy is 'constant'."""
+        if self.missing_strategy == "constant" and self.missing_constant_value is None:
+            raise ValueError("missing_constant_value must be provided when missing_strategy is 'constant'")
+        return self
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "drop_duplicates": True,
+                "missing_strategy": "mean",
+                "missing_constant_value": None,
+                "outlier_handling": "iqr",
+                "outlier_threshold": 1.5,
+                "outlier_action": "cap",
+                "normalize_column_names": True,
+                "remove_empty_columns": True
+            }
+        }
+    )
+
+
+class EncodingConfig(BaseModel):
+    """Configuration for data encoding operations."""
+    model_config = ConfigDict(extra="forbid")
+    
+    categorical_columns: List[str] = Field(
+        default_factory=list,
+        description="List of categorical columns to encode (empty list means auto-detect)"
+    )
+    
+    method: Literal["none", "label", "onehot", "target"] = Field(
+        default="none",
+        description="Categorical encoding method to use"
+    )
+    
+    handle_unseen: Literal["ignore", "token"] = Field(
+        default="token",
+        description="How to handle unseen categories during encoding"
+    )
+    
+    max_categories_for_onehot: int = Field(
+        default=10,
+        ge=2,
+        le=50,
+        description="Maximum number of categories for one-hot encoding"
+    )
+    
+    scale_numerical: bool = Field(
+        default=False,
+        description="Whether to scale numerical columns"
+    )
+    
+    scaling_method: Literal["standard", "minmax", "robust", "none"] = Field(
+        default="standard",
+        description="Method for scaling numerical columns"
+    )
+
+    @model_validator(mode='after')
+    def validate_encoding_consistency(self):
+        """Validate encoding configuration consistency."""
+        if self.method in {"label", "onehot", "target"} and not self.categorical_columns:
+            # Allow empty categorical_columns - will auto-detect
+            pass
+        
+        if self.method == "onehot":
+            for col in self.categorical_columns:
+                # Note: Actual cardinality check will happen at runtime
+                pass
+        
+        return self
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "categorical_columns": ["department", "city", "status"],
+                "method": "label",
+                "handle_unseen": "token",
+                "max_categories_for_onehot": 10,
+                "scale_numerical": True,
+                "scaling_method": "standard"
+            }
+        }
+    )
+
+
+class PreprocessingRequest(BaseModel):
+    """Request configuration for data preprocessing pipeline."""
+    model_config = ConfigDict(extra="forbid")
+    
+    cleaning: CleaningConfig = Field(
+        default_factory=CleaningConfig,
+        description="Configuration for data cleaning operations"
+    )
+    
+    encoding: EncodingConfig = Field(
+        default_factory=EncodingConfig,
+        description="Configuration for data encoding operations"
+    )
+    
+    validate_first: bool = Field(
+        default=True,
+        description="Whether to validate data quality before processing"
+    )
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "cleaning": {
+                    "drop_duplicates": True,
+                    "missing_strategy": "mean",
+                    "outlier_handling": "iqr",
+                    "normalize_column_names": True
+                },
+                "encoding": {
+                    "categorical_columns": ["department", "city"],
+                    "method": "label",
+                    "scale_numerical": True,
+                    "scaling_method": "standard"
+                },
+                "validate_first": True
+            }
+        }
+    )
+
+
+class FileUploadResponse(BaseModel):
+    """Response from file upload and initial analysis."""
+    model_config = ConfigDict(extra="forbid")
+    
+    filename: str = Field(..., description="Original filename that was uploaded")
+    file_size: int = Field(..., description="File size in bytes")
+    row_count: int = Field(..., description="Number of rows in the dataset")
+    column_count: int = Field(..., description="Number of columns in the dataset")
+    preview_rows: List[Dict[str, Any]] = Field(
+        ..., 
+        description="Preview of first few rows as list of dictionaries"
+    )
+    initial_cleanliness_report: CleanlinessReport = Field(
+        ..., 
+        description="Initial data quality assessment"
+    )
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "filename": "sales_data.csv",
+                "file_size": 2621440,
+                "row_count": 1000,
+                "column_count": 8,
+                "preview_rows": [
                     {
-                        "id": 1,
                         "name": "John Doe",
                         "age": 30,
-                        "department": "Engineering",
+                        "department": "IT",
                         "salary": 75000.0,
-                        "hire_date": "2020-01-15",
-                        "performance_score": 4.2,
-                        "active": True
+                        "city": "New York"
+                    },
+                    {
+                        "name": "Jane Smith",
+                        "age": 25,
+                        "department": "HR",
+                        "salary": 55000.0,
+                        "city": "Chicago"
+                    }
+                ],
+                "initial_cleanliness_report": {
+                    "total_rows": 1000,
+                    "total_columns": 8,
+                    "missing_per_column": {
+                        "name": 0.0,
+                        "age": 0.08,
+                        "department": 0.0,
+                        "salary": 0.12
+                    },
+                    "duplicate_rows": 15,
+                    "column_types": {
+                        "name": "object",
+                        "age": "int64",
+                        "department": "object",
+                        "salary": "float64"
+                    },
+                    "categorical_cardinality": {
+                        "department": 5,
+                        "city": 12
+                    }
+                }
+            }
+        }
+    )
+
+
+class PreprocessingResponse(BaseModel):
+    """Response from data preprocessing pipeline."""
+    model_config = ConfigDict(extra="forbid")
+    
+    initial_cleanliness_report: CleanlinessReport = Field(
+        ..., 
+        description="Data quality report before processing"
+    )
+    
+    final_cleanliness_report: CleanlinessReport = Field(
+        ..., 
+        description="Data quality report after processing"
+    )
+    
+    validation_report: ValidationReport = Field(
+        ..., 
+        description="Results from data validation checks"
+    )
+    
+    audit_log: List[Dict[str, Any]] = Field(
+        ..., 
+        description="Complete audit trail of all operations performed"
+    )
+    
+    preview_rows: List[Dict[str, Any]] = Field(
+        ..., 
+        description="Preview of processed data as list of dictionaries"
+    )
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "initial_cleanliness_report": {
+                    "total_rows": 1000,
+                    "total_columns": 8,
+                    "missing_per_column": {"age": 0.08, "salary": 0.12},
+                    "duplicate_rows": 15,
+                    "column_types": {"age": "int64", "salary": "float64"},
+                    "categorical_cardinality": {"department": 5}
+                },
+                "final_cleanliness_report": {
+                    "total_rows": 985,
+                    "total_columns": 10,
+                    "missing_per_column": {"age": 0.0, "salary": 0.0},
+                    "duplicate_rows": 0,
+                    "column_types": {"age": "int64", "salary": "float64"},
+                    "categorical_cardinality": {"department": 5}
+                },
+                "validation_report": {
+                    "valid": True,
+                    "errors": [],
+                    "warnings": ["Large dataset detected"],
+                    "details": {}
+                },
+                "audit_log": [
+                    {
+                        "operation": "remove_duplicates",
+                        "timestamp": "2024-01-15T10:30:45.123456",
+                        "before_shape": [1000, 8],
+                        "after_shape": [985, 8],
+                        "details": {"rows_removed": 15}
+                    },
+                    {
+                        "operation": "encode_categorical",
+                        "column": "department",
+                        "timestamp": "2024-01-15T10:32:15.789012",
+                        "before_shape": [985, 8],
+                        "after_shape": [985, 8],
+                        "details": {"method": "label", "unique_values": 5}
+                    }
+                ],
+                "preview_rows": [
+                    {
+                        "name": "John Doe",
+                        "age": 30,
+                        "department": 1,
+                        "salary": 75000.0,
+                        "city": 0
+                    },
+                    {
+                        "name": "Jane Smith",
+                        "age": 25,
+                        "department": 2,
+                        "salary": 55000.0,
+                        "city": 1
                     }
                 ]
             }
         }
-
-
-class DataQualityReport(BaseModel):
-    """Comprehensive data quality report."""
-    
-    validation_report: ValidationReport = Field(description="Results from data validation checks")
-    column_statistics: Dict[str, Dict[str, Any]] = Field(
-        description="Statistical summary for each column including mean, median, std, min, max for numerical columns and value counts for categorical columns"
     )
-    data_quality_score: float = Field(
-        ge=0.0,
-        le=1.0,
-        description="Overall data quality score from 0.0 (poor) to 1.0 (excellent) based on completeness, consistency, and validity"
+
+
+# Additional utility models for comprehensive API coverage
+class ErrorResponse(BaseModel):
+    """Standardized error response format."""
+    model_config = ConfigDict(extra="forbid")
+    
+    error: bool = Field(default=True, description="Always true to indicate this is an error response")
+    error_type: str = Field(..., description="Classification of the error that occurred")
+    message: str = Field(..., description="Human-readable error message")
+    details: Optional[Dict[str, Any]] = Field(
+        default=None, 
+        description="Additional error details and context"
     )
-    recommendations: List[str] = Field(description="Prioritized list of actionable recommendations to improve data quality")
+    timestamp: str = Field(..., description="ISO timestamp when the error occurred")
 
-
-class TransformationHistory(BaseModel):
-    """History of transformations applied to the dataset."""
-    
-    transformation_id: str = Field(description="Unique identifier for this transformation session")
-    timestamp: str = Field(description="ISO 8601 timestamp when the transformation was applied")
-    transformation_type: str = Field(description="Type of transformation performed (e.g., 'cleaning', 'encoding', 'validation')")
-    parameters: Dict[str, Any] = Field(
-        description="Complete set of parameters and configuration used for this transformation"
-    )
-    input_shape: Tuple[int, int] = Field(description="Dataset dimensions as (rows, columns) before this transformation")
-    output_shape: Tuple[int, int] = Field(description="Dataset dimensions as (rows, columns) after this transformation")
-    actions_performed: List[str] = Field(description="Detailed chronological list of all actions performed during this transformation")
-
-
-class PreprocessingPipeline(BaseModel):
-    """Complete preprocessing pipeline configuration."""
-    
-    pipeline_name: str = Field(description="Human-readable name for this preprocessing pipeline configuration")
-    steps: List[str] = Field(description="Ordered list of preprocessing steps to execute (e.g., ['validation', 'cleaning', 'encoding'])")
-    cleaning_config: Optional[CleaningConfig] = Field(default=None, description="Configuration for data cleaning step")
-    encoding_config: Optional[EncodingConfig] = Field(default=None, description="Configuration for data encoding step")
-    validation_enabled: bool = Field(default=True, description="Whether to include data validation in the pipeline")
-    save_intermediates: bool = Field(default=True, description="Whether to preserve intermediate results after each step for debugging")
-
-
-class BatchProcessingRequest(BaseModel):
-    """Request for batch processing multiple files."""
-    
-    pipeline_config: PreprocessingPipeline = Field(description="Pipeline configuration to apply to all files in the batch")
-    output_format: Literal["csv", "xlsx", "json", "parquet"] = Field(
-        default="csv", 
-        description="Output file format for all processed files"
-    )
-    merge_results: bool = Field(default=False, description="Whether to combine all processed files into a single output file")
-    
-    class Config:
-        schema_extra = {
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
             "example": {
-                "pipeline_config": {
-                    "pipeline_name": "Standard Data Prep",
-                    "steps": ["validation", "cleaning", "encoding"],
-                    "cleaning_config": {
-                        "remove_duplicates": True,
-                        "handle_missing_values": True,
-                        "missing_value_strategy": "fill_mean",
-                        "missing_threshold": 0.3,
-                        "remove_outliers": False,
-                        "normalize_column_names": True
-                    },
-                    "encoding_config": {
-                        "categorical_encoding_method": "onehot",
-                        "scale_numerical": True,
-                        "scaling_method": "standard",
-                        "target_column": "target",
-                        "drop_first": True
-                    },
-                    "validation_enabled": True,
-                    "save_intermediates": False
+                "error": True,
+                "error_type": "ValidationError",
+                "message": "File size exceeds maximum limit (100MB)",
+                "details": {
+                    "file_size_mb": 150.0,
+                    "max_allowed_mb": 100.0,
+                    "filename": "large_dataset.csv"
                 },
-                "output_format": "csv",
-                "merge_results": False
+                "timestamp": "2024-01-15T10:30:00.000000"
             }
         }
+    )
 
 
-class BatchProcessingResponse(BaseModel):
-    """Response from batch processing."""
+class HealthCheckResponse(BaseModel):
+    """Health check response for system monitoring."""
+    model_config = ConfigDict(extra="forbid")
     
-    total_files_processed: int = Field(description="Total number of files attempted to process")
-    successful_files: int = Field(description="Number of files that were successfully processed without errors")
-    failed_files: int = Field(description="Number of files that failed during processing")
-    processing_time: float = Field(description="Total elapsed processing time in seconds for the entire batch")
-    output_files: List[str] = Field(description="List of file paths for all successfully generated output files")
-    error_log: List[Dict[str, str]] = Field(
-        description="Detailed error information for failed files. Each entry contains 'filename' and 'error' keys"
+    status: Literal["healthy", "degraded", "unhealthy"] = Field(
+        ..., 
+        description="Current system health status"
     )
-    summary_statistics: Dict[str, Any] = Field(
-        description="Aggregated statistics across all successfully processed files including total rows, columns, and processing metrics"
+    version: str = Field(..., description="Current service version")
+    uptime_seconds: float = Field(..., description="Service uptime in seconds")
+    memory_usage_mb: float = Field(..., description="Current memory usage in MB")
+    timestamp: str = Field(..., description="ISO timestamp of this health check")
+
+    model_config = ConfigDict(
+        extra="forbid",
+        json_schema_extra={
+            "example": {
+                "status": "healthy",
+                "version": "1.0.0",
+                "uptime_seconds": 86400.0,
+                "memory_usage_mb": 512.3,
+                "timestamp": "2024-01-15T10:00:00.000000"
+            }
+        }
     )
+
+
+# Validation helper functions
+def validate_column_exists(df: pd.DataFrame, columns: List[str]) -> List[str]:
+    """Validate that specified columns exist in DataFrame."""
+    missing_columns = [col for col in columns if col not in df.columns]
+    if missing_columns:
+        raise ValueError(f"Columns not found in DataFrame: {missing_columns}")
+    return columns
+
+
+def validate_numeric_columns(df: pd.DataFrame, columns: List[str]) -> List[str]:
+    """Validate that specified columns are numeric."""
+    non_numeric = [col for col in columns if not pd.api.types.is_numeric_dtype(df[col])]
+    if non_numeric:
+        raise ValueError(f"Non-numeric columns specified for numeric operations: {non_numeric}")
+    return columns
+
+
+def validate_categorical_columns(df: pd.DataFrame, columns: List[str]) -> List[str]:
+    """Validate that specified columns are suitable for categorical encoding."""
+    unsuitable = []
+    for col in columns:
+        if pd.api.types.is_numeric_dtype(df[col]):
+            unique_ratio = df[col].nunique() / len(df[col].dropna())
+            if unique_ratio > 0.5:  # More than 50% unique values
+                unsuitable.append(col)
+    
+    if unsuitable:
+        raise ValueError(f"Columns may not be suitable for categorical encoding (high cardinality): {unsuitable}")
+    return columns

@@ -7,12 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Dict, Any, List, Union
 import time
-from enum import Enum
 
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import (
     accuracy_score, precision_score, recall_score, f1_score,
-    mean_squared_error, r2_score, confusion_matrix
+    mean_squared_error, r2_score, confusion_matrix, mean_absolute_error
 )
 from sklearn.ensemble import RandomForestClassifier, RandomForestRegressor, GradientBoostingClassifier, GradientBoostingRegressor
 from sklearn.linear_model import LogisticRegression, LinearRegression, Ridge, Lasso
@@ -23,39 +22,17 @@ from sklearn.exceptions import NotFittedError
 import joblib
 
 from fastapi import HTTPException
-from ..schemas.modeling import (
+
+from app.schemas.modeling import (
     ModelConfig, TrainingResponse, EvaluationMetrics, 
-    PredictionResponse
+    PredictionResponse, ModelInfo, ModelListResponse,
+    ModelConfigExport, CleanupResult, ModelHealthStatus,
+    ModelAlgorithm, ProblemType, ModelSummary
 )
-from ..config import settings
+from app.config import settings
 
 # Configure logging
 logger = logging.getLogger(__name__)
-
-class ModelAlgorithm(str, Enum):
-    """Supported machine learning algorithms."""
-    # Classification algorithms
-    RANDOM_FOREST_CLASSIFIER = "random_forest_classifier"
-    LOGISTIC_REGRESSION = "logistic_regression"
-    GRADIENT_BOOSTING_CLASSIFIER = "gradient_boosting_classifier"
-    SVC = "svc"
-    KNN_CLASSIFIER = "knn_classifier"
-    DECISION_TREE_CLASSIFIER = "decision_tree_classifier"
-    
-    # Regression algorithms
-    RANDOM_FOREST_REGRESSOR = "random_forest_regressor"
-    LINEAR_REGRESSION = "linear_regression"
-    RIDGE_REGRESSION = "ridge_regression"
-    LASSO_REGRESSION = "lasso_regression"
-    GRADIENT_BOOSTING_REGRESSOR = "gradient_boosting_regressor"
-    SVR = "svr"
-    KNN_REGRESSOR = "knn_regressor"
-    DECISION_TREE_REGRESSOR = "decision_tree_regressor"
-
-class ProblemType(str, Enum):
-    """Machine learning problem types."""
-    CLASSIFICATION = "classification"
-    REGRESSION = "regression"
 
 class ModelingService:
     """Production-grade machine learning service for training, evaluation, and prediction."""
@@ -64,7 +41,7 @@ class ModelingService:
         self.model_registry_path = Path(settings.ml.model_path) / "model_registry.json"
         self._ensure_directories()
         
-        # Define available algorithms
+        # Define available algorithms with full names
         self.classification_algorithms = {
             ModelAlgorithm.RANDOM_FOREST_CLASSIFIER: RandomForestClassifier,
             ModelAlgorithm.LOGISTIC_REGRESSION: LogisticRegression,
@@ -85,13 +62,29 @@ class ModelingService:
             ModelAlgorithm.DECISION_TREE_REGRESSOR: DecisionTreeRegressor,
         }
         
+        # Algorithm mapping for aliases
+        self.algorithm_mapping = {
+            # Classification aliases
+            "random_forest": "random_forest_classifier",
+            "logistic_regression": "logistic_regression",
+            "gradient_boosting": "gradient_boosting_classifier",
+            "svc": "svc",
+            "knn": "knn_classifier",
+            "decision_tree": "decision_tree_classifier",
+            
+            # Regression aliases
+            "linear_regression": "linear_regression",
+            "ridge": "ridge_regression",
+            "lasso": "lasso_regression",
+        }
+        
         # Default hyperparameters for each algorithm
         self.default_hyperparameters = {
             # Classification
             ModelAlgorithm.RANDOM_FOREST_CLASSIFIER: {"random_state": 42, "n_estimators": 100},
             ModelAlgorithm.LOGISTIC_REGRESSION: {"random_state": 42, "max_iter": 1000},
             ModelAlgorithm.GRADIENT_BOOSTING_CLASSIFIER: {"random_state": 42},
-            ModelAlgorithm.SVC: {"random_state": 42, "probability": True},  # Enable probability for confidence scores
+            ModelAlgorithm.SVC: {"random_state": 42, "probability": True},
             ModelAlgorithm.KNN_CLASSIFIER: {"n_neighbors": 5},
             ModelAlgorithm.DECISION_TREE_CLASSIFIER: {"random_state": 42},
             
@@ -115,22 +108,80 @@ class ModelingService:
         if self.model_registry_path.exists():
             try:
                 with open(self.model_registry_path, 'r') as f:
-                    return json.load(f)
+                    content = f.read().strip()
+                    if not content:
+                        logger.debug("Model registry file is empty, returning empty dict")
+                        return {}
+                    return json.loads(content)
             except (json.JSONDecodeError, IOError) as e:
-                logger.warning(f"Failed to load model registry: {e}")
-        return {}
+                logger.warning(f"Failed to load model registry: {e}, returning empty dict")
+                return {}
+        else:
+            logger.debug("Model registry file does not exist, returning empty dict")
+            return {}
     
     def _save_model_registry(self, registry: Dict[str, Any]) -> None:
         """Save the model registry to disk."""
         try:
+            # Ensure parent directory exists
+            self.model_registry_path.parent.mkdir(parents=True, exist_ok=True)
+            
             with open(self.model_registry_path, 'w') as f:
                 json.dump(registry, f, indent=2, default=str)
+            logger.debug(f"Model registry saved to {self.model_registry_path}")
         except IOError as e:
             logger.error(f"Failed to save model registry: {e}")
             raise HTTPException(
                 status_code=500,
                 detail=f"Failed to save model registry: {str(e)}"
             )
+    
+    def _resolve_algorithm(self, algorithm: str, problem_type: ProblemType) -> ModelAlgorithm:
+        """Resolve algorithm alias to full algorithm name based on problem type."""
+        # First check if it's already a full algorithm name
+        try:
+            return ModelAlgorithm(algorithm)
+        except ValueError:
+            pass
+        
+        # Check if it's an alias
+        if algorithm in self.algorithm_mapping:
+            base_name = self.algorithm_mapping[algorithm]
+            
+            # Map to specific problem type
+            if problem_type == ProblemType.CLASSIFICATION:
+                if base_name == "random_forest_classifier":
+                    return ModelAlgorithm.RANDOM_FOREST_CLASSIFIER
+                elif base_name == "logistic_regression":
+                    return ModelAlgorithm.LOGISTIC_REGRESSION
+                elif base_name == "gradient_boosting_classifier":
+                    return ModelAlgorithm.GRADIENT_BOOSTING_CLASSIFIER
+                elif base_name == "svc":
+                    return ModelAlgorithm.SVC
+                elif base_name == "knn_classifier":
+                    return ModelAlgorithm.KNN_CLASSIFIER
+                elif base_name == "decision_tree_classifier":
+                    return ModelAlgorithm.DECISION_TREE_CLASSIFIER
+            elif problem_type == ProblemType.REGRESSION:
+                if algorithm == "random_forest":
+                    return ModelAlgorithm.RANDOM_FOREST_REGRESSOR
+                elif algorithm == "linear_regression":
+                    return ModelAlgorithm.LINEAR_REGRESSION
+                elif algorithm == "ridge":
+                    return ModelAlgorithm.RIDGE_REGRESSION
+                elif algorithm == "lasso":
+                    return ModelAlgorithm.LASSO_REGRESSION
+                elif algorithm == "gradient_boosting":
+                    return ModelAlgorithm.GRADIENT_BOOSTING_REGRESSOR
+                elif algorithm == "knn":
+                    return ModelAlgorithm.KNN_REGRESSOR
+                elif algorithm == "decision_tree":
+                    return ModelAlgorithm.DECISION_TREE_REGRESSOR
+        
+        raise HTTPException(
+            status_code=422,
+            detail=f"Unknown algorithm: {algorithm} for problem type: {problem_type}"
+        )
     
     def _validate_dataframe(self, df: pd.DataFrame, config: ModelConfig) -> None:
         """Validate input dataframe and configuration."""
@@ -140,7 +191,7 @@ class ModelingService:
                 detail="DataFrame is empty or None"
             )
         
-        if len(df) < 10:  # Increased minimum for better model training
+        if len(df) < 10:
             raise HTTPException(
                 status_code=422,
                 detail=f"Dataset too small for training (minimum 10 samples required, got {len(df)})"
@@ -202,15 +253,6 @@ class ModelingService:
         # Otherwise, assume regression
         return ProblemType.REGRESSION
     
-    def _validate_model_type(self, model_type: str) -> None:
-        """Validate model type."""
-        if model_type not in [ProblemType.CLASSIFICATION, ProblemType.REGRESSION]:
-            raise HTTPException(
-                status_code=422,
-                detail=f"Unsupported model type: {model_type}. "
-                       f"Supported types: {[e.value for e in ProblemType]}"
-            )
-    
     def _prepare_data(self, df: pd.DataFrame, config: ModelConfig) -> tuple:
         """Prepare data for training with improved error handling."""
         try:
@@ -261,7 +303,7 @@ class ModelingService:
                     X, y, 
                     test_size=test_size, 
                     random_state=random_state,
-                    stratify=y if config.model_type == ProblemType.CLASSIFICATION and len(np.unique(y)) > 1 else None
+                    stratify=y if config.problem_type == ProblemType.CLASSIFICATION and len(np.unique(y)) > 1 else None
                 )
             except ValueError as e:
                 if "stratify" in str(e):
@@ -285,7 +327,7 @@ class ModelingService:
             )
     
     def _get_algorithms_for_problem_type(self, problem_type: ProblemType, 
-                                       specific_algorithm: Optional[str] = None) -> Dict[str, Any]:
+                                       specific_algorithm: Optional[ModelAlgorithm] = None) -> Dict[ModelAlgorithm, Any]:
         """Get available algorithms for the given problem type."""
         if problem_type == ProblemType.CLASSIFICATION:
             algorithms = self.classification_algorithms
@@ -298,13 +340,13 @@ class ModelingService:
                 raise HTTPException(
                     status_code=422,
                     detail=f"Algorithm '{specific_algorithm}' not available for {problem_type}. "
-                           f"Available algorithms: {available}"
+                           f"Available algorithms: {[a.value for a in available]}"
                 )
             return {specific_algorithm: algorithms[specific_algorithm]}
         
         return algorithms
     
-    def _initialize_model(self, algorithm: str, hyperparameters: Optional[Dict] = None):
+    def _initialize_model(self, algorithm: ModelAlgorithm, hyperparameters: Optional[Dict] = None):
         """Initialize a model with given algorithm and hyperparameters."""
         try:
             # Get the model class
@@ -331,7 +373,7 @@ class ModelingService:
                 detail=f"Model initialization failed for {algorithm}: {str(e)}"
             )
     
-    def train_model(self, df: pd.DataFrame, config: ModelConfig) -> TrainingResponse:
+    def train_model(self, config: ModelConfig) -> TrainingResponse:
         """Train machine learning models with auto-selection of best performing algorithm."""
         start_time = time.time()
         model_id = str(uuid.uuid4())
@@ -340,13 +382,27 @@ class ModelingService:
         logger.info(f"Config: Features={config.feature_columns}, Target={config.target_column}")
         
         try:
+            # Load data from file
+            if not Path(config.data_file_path).exists():
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Data file not found: {config.data_file_path}"
+                )
+            
+            try:
+                df = pd.read_csv(config.data_file_path)
+            except Exception as e:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"Failed to load data file: {str(e)}"
+                )
+            
             # Auto-detect problem type if not specified
-            if not config.model_type:
-                config.model_type = self._detect_problem_type(df, config.target_column)
-                logger.info(f"Auto-detected problem type: {config.model_type}")
+            if not config.problem_type:
+                config.problem_type = self._detect_problem_type(df, config.target_column)
+                logger.info(f"Auto-detected problem type: {config.problem_type}")
             
             # Validation
-            self._validate_model_type(config.model_type)
             self._validate_dataframe(df, config)
             
             # Prepare data
@@ -354,9 +410,13 @@ class ModelingService:
             
             logger.info(f"Data prepared - Train size: {len(X_train)}, Test size: {len(X_test)}")
             
+            # Resolve algorithm if specified
+            specific_algorithm = None
+            if config.algorithm:
+                specific_algorithm = self._resolve_algorithm(config.algorithm, config.problem_type)
+            
             # Get algorithms to try
-            specific_algorithm = getattr(config, 'algorithm', None)
-            algorithms = self._get_algorithms_for_problem_type(config.model_type, specific_algorithm)
+            algorithms = self._get_algorithms_for_problem_type(config.problem_type, specific_algorithm)
             
             best_model = None
             best_algorithm = None
@@ -365,13 +425,13 @@ class ModelingService:
             all_results = {}
             
             # Train and evaluate each algorithm
-            for algorithm_name, algorithm_class in algorithms.items():
+            for algorithm_enum, algorithm_class in algorithms.items():
                 try:
-                    logger.info(f"Training {algorithm_name}...")
+                    logger.info(f"Training {algorithm_enum.value}...")
                     model_start_time = time.time()
                     
                     # Initialize model
-                    model = self._initialize_model(algorithm_name, config.hyperparameters)
+                    model = self._initialize_model(algorithm_enum, config.hyperparameters)
                     
                     # Train model
                     model.fit(X_train, y_train)
@@ -380,17 +440,17 @@ class ModelingService:
                     y_pred = model.predict(X_test)
                     
                     # Evaluate model
-                    metrics = self.evaluate_model(y_test, y_pred, config.model_type)
+                    metrics = self._evaluate_model(y_test, y_pred, config.problem_type)
                     
                     # Calculate score for model selection
-                    if config.model_type == ProblemType.CLASSIFICATION:
+                    if config.problem_type == ProblemType.CLASSIFICATION:
                         score = metrics.accuracy
                     else:
-                        score = metrics.r2_score
+                        score = metrics.r2_score if metrics.r2_score is not None else 0
                     
                     model_time = time.time() - model_start_time
                     
-                    all_results[algorithm_name] = {
+                    all_results[algorithm_enum.value] = {
                         "score": score,
                         "metrics": metrics,
                         "training_time": model_time
@@ -400,13 +460,13 @@ class ModelingService:
                     if score > best_score:
                         best_score = score
                         best_model = model
-                        best_algorithm = algorithm_name
+                        best_algorithm = algorithm_enum
                         best_metrics = metrics
                     
-                    logger.info(f"Completed {algorithm_name} - Score: {score:.4f}, Time: {model_time:.2f}s")
+                    logger.info(f"Completed {algorithm_enum.value} - Score: {score:.4f}, Time: {model_time:.2f}s")
                     
                 except Exception as e:
-                    logger.warning(f"Failed to train {algorithm_name}: {str(e)}")
+                    logger.warning(f"Failed to train {algorithm_enum.value}: {str(e)}")
                     continue
             
             if best_model is None:
@@ -416,7 +476,7 @@ class ModelingService:
                 )
             
             total_training_time = time.time() - start_time
-            logger.info(f"Best algorithm: {best_algorithm} with score: {best_score:.4f}")
+            logger.info(f"Best algorithm: {best_algorithm.value} with score: {best_score:.4f}")
             
             # Save best model
             model_filename = f"model_{model_id}.joblib"
@@ -432,17 +492,17 @@ class ModelingService:
                     detail=f"Failed to save model to {model_path}: {str(e)}"
                 )
             
-            # Update model registry with comprehensive information
+            # Update model registry
             registry = self._load_model_registry()
             registry[model_id] = {
                 "model_id": model_id,
                 "timestamp": datetime.now().isoformat(),
-                "model_type": config.model_type,
-                "algorithm": best_algorithm,
+                "problem_type": config.problem_type.value,
+                "algorithm": best_algorithm.value,
                 "feature_columns": config.feature_columns,
                 "target_column": config.target_column,
                 "model_path": str(model_path),
-                "hyperparameters": config.hyperparameters,
+                "hyperparameters": config.hyperparameters or {},
                 "train_size": len(X_train),
                 "test_size": len(X_test),
                 "total_training_time": total_training_time,
@@ -462,7 +522,8 @@ class ModelingService:
             # Create response
             response = TrainingResponse(
                 model_id=model_id,
-                model_type=config.model_type,
+                problem_type=config.problem_type,
+                algorithm=best_algorithm.value,
                 feature_columns=config.feature_columns,
                 model_path=str(model_path),
                 training_time=total_training_time,
@@ -470,8 +531,8 @@ class ModelingService:
                 test_size=len(X_test)
             )
             
-            # Set metrics based on model type
-            if config.model_type == ProblemType.CLASSIFICATION:
+            # Set metrics based on problem type
+            if config.problem_type == ProblemType.CLASSIFICATION:
                 response.accuracy = best_metrics.accuracy
                 response.precision = best_metrics.precision
                 response.recall = best_metrics.recall
@@ -480,11 +541,7 @@ class ModelingService:
                 response.mse = best_metrics.mse
                 response.r2_score = best_metrics.r2_score
             
-            # Add best algorithm info to response
-            response.algorithm = best_algorithm
-            response.best_score = best_score
-            
-            logger.info(f"Model training completed successfully - ID: {model_id}, Algorithm: {best_algorithm}")
+            logger.info(f"Model training completed successfully - ID: {model_id}, Algorithm: {best_algorithm.value}")
             return response
             
         except HTTPException:
@@ -496,12 +553,12 @@ class ModelingService:
                 detail=f"Unexpected error during model training: {str(e)}"
             )
     
-    def evaluate_model(self, y_true: np.ndarray, y_pred: np.ndarray, model_type: str) -> EvaluationMetrics:
+    def _evaluate_model(self, y_true: np.ndarray, y_pred: np.ndarray, problem_type: ProblemType) -> EvaluationMetrics:
         """Evaluate model performance and return comprehensive metrics."""
         try:
             metrics = EvaluationMetrics()
             
-            if model_type == ProblemType.CLASSIFICATION:
+            if problem_type == ProblemType.CLASSIFICATION:
                 metrics.accuracy = float(accuracy_score(y_true, y_pred))
                 
                 # Handle multi-class and binary classification
@@ -525,17 +582,16 @@ class ModelingService:
                 except Exception as e:
                     logger.warning(f"Failed to compute confusion matrix: {e}")
                     
-            elif model_type == ProblemType.REGRESSION:
+            elif problem_type == ProblemType.REGRESSION:
                 metrics.mse = float(mean_squared_error(y_true, y_pred))
                 metrics.r2_score = float(r2_score(y_true, y_pred))
                 metrics.rmse = float(np.sqrt(metrics.mse))
                 
                 # Add mean absolute error
                 try:
-                    from sklearn.metrics import mean_absolute_error
                     metrics.mae = float(mean_absolute_error(y_true, y_pred))
-                except ImportError:
-                    pass
+                except Exception as e:
+                    logger.warning(f"Failed to compute MAE: {e}")
             
             return metrics
             
@@ -546,91 +602,67 @@ class ModelingService:
                 detail=f"Model evaluation failed: {str(e)}"
             )
     
-    def load_model(self, model_path: str):
-        """Load a trained model from disk with enhanced error handling."""
+    def predict(self, model_id: str, data: pd.DataFrame) -> PredictionResponse:
+        """Make predictions using a trained model."""
         try:
-            path = Path(model_path)
-            if not path.exists():
+            # Get model info from registry
+            registry = self._load_model_registry()
+            if model_id not in registry:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"Model with ID {model_id} not found in registry"
+                )
+            
+            model_info = registry[model_id]
+            model_path = model_info['model_path']
+            
+            # Load model
+            if not Path(model_path).exists():
                 raise HTTPException(
                     status_code=404,
                     detail=f"Model file not found: {model_path}"
                 )
             
-            if not path.suffix == '.joblib':
+            try:
+                model = joblib.load(model_path)
+            except Exception as e:
                 raise HTTPException(
-                    status_code=400,
-                    detail=f"Invalid model file format. Expected .joblib, got {path.suffix}"
+                    status_code=500,
+                    detail=f"Failed to load model: {str(e)}"
                 )
             
-            model = joblib.load(path)
-            logger.info(f"Model loaded successfully from: {model_path}")
-            return model
-            
-        except HTTPException:
-            raise
-        except Exception as e:
-            logger.error(f"Failed to load model from {model_path}: {str(e)}")
-            raise HTTPException(
-                status_code=500,
-                detail=f"Failed to load model: {str(e)}"
-            )
-    
-    def predict(self, model_path: str, input_data: pd.DataFrame, 
-               validate_input: bool = True) -> PredictionResponse:
-        """Make predictions using a trained model with comprehensive validation."""
-        try:
-            # Load model
-            model = self.load_model(model_path)
-            
-            # Get model info from registry
-            model_id = Path(model_path).stem.replace('model_', '')
-            registry = self._load_model_registry()
-            model_info = registry.get(model_id, {})
-            
-            model_type = model_info.get('model_type', 'unknown')
-            feature_columns = model_info.get('feature_columns', [])
-            algorithm = model_info.get('algorithm', 'unknown')
-            
             # Validate input data
-            if input_data is None or input_data.empty:
+            if data is None or data.empty:
                 raise HTTPException(
                     status_code=400,
                     detail="Input data is empty or None"
                 )
             
-            if validate_input and feature_columns:
-                # Check if required features are present
-                missing_features = [col for col in feature_columns if col not in input_data.columns]
-                if missing_features:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Missing required features: {missing_features}. "
-                               f"Expected features: {feature_columns}"
-                    )
-                
-                # Check for extra features
-                extra_features = [col for col in input_data.columns if col not in feature_columns]
-                if extra_features:
-                    logger.warning(f"Input contains extra features that will be ignored: {extra_features}")
-                
-                # Select only the required features in the correct order
-                X = input_data[feature_columns].copy()
-            else:
-                X = input_data.copy()
+            feature_columns = model_info.get('feature_columns', [])
+            problem_type = model_info.get('problem_type', 'unknown')
+            algorithm = model_info.get('algorithm', 'unknown')
             
-            # Handle missing values with strict validation
+            # Check if required features are present
+            missing_features = [col for col in feature_columns if col not in data.columns]
+            if missing_features:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Missing required features: {missing_features}. "
+                           f"Expected features: {feature_columns}"
+                )
+            
+            # Select only the required features in the correct order
+            X = data[feature_columns].copy()
+            
+            # Handle missing values
             if X.isnull().any().any():
                 null_columns = X.columns[X.isnull().any()].tolist()
                 null_count = X.isnull().sum().sum()
-                
-                if validate_input:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Input data contains {null_count} missing values in columns: {null_columns}. "
-                               f"Please handle missing values before prediction."
-                    )
-                else:
-                    logger.warning(f"Input data contains missing values in columns: {null_columns}")
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Input data contains {null_count} missing values in columns: {null_columns}. "
+                           f"Please handle missing values before prediction."
+                )
             
             # Check for non-numeric data
             non_numeric_cols = []
@@ -649,60 +681,32 @@ class ModelingService:
             try:
                 predictions = model.predict(X)
             except ValueError as e:
-                if "feature" in str(e).lower():
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Feature mismatch error: {str(e)}. "
-                               f"Expected features: {feature_columns if feature_columns else 'unknown'}"
-                    )
-                else:
-                    raise HTTPException(
-                        status_code=400,
-                        detail=f"Prediction error: {str(e)}"
-                    )
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Prediction error: {str(e)}"
+                )
             
             # Get confidence scores if available (for classification)
             confidence_scores = None
-            if hasattr(model, 'predict_proba') and model_type == ProblemType.CLASSIFICATION:
+            if hasattr(model, 'predict_proba') and problem_type == ProblemType.CLASSIFICATION.value:
                 try:
                     proba = model.predict_proba(X)
                     confidence_scores = np.max(proba, axis=1).tolist()
                 except Exception as e:
                     logger.warning(f"Failed to compute confidence scores: {e}")
             
-            # Get feature importance if available
-            feature_importance = None
-            if hasattr(model, 'feature_importances_') and feature_columns:
-                try:
-                    importance_dict = dict(zip(feature_columns, model.feature_importances_))
-                    # Sort by importance
-                    feature_importance = dict(sorted(importance_dict.items(), 
-                                                   key=lambda x: x[1], reverse=True))
-                except Exception as e:
-                    logger.warning(f"Failed to compute feature importance: {e}")
-            
             response = PredictionResponse(
-                predictions=predictions.tolist(),
                 model_id=model_id,
-                model_type=model_type,
+                predictions=predictions.tolist(),
                 confidence_scores=confidence_scores,
                 num_predictions=len(predictions)
             )
-            
-            # Add additional info
-            response.algorithm = algorithm
-            response.feature_importance = feature_importance
             
             logger.info(f"Predictions generated successfully - {len(predictions)} samples using {algorithm}")
             return response
             
         except HTTPException:
             raise
-        except NotFittedError:
-            raise HTTPException(
-                status_code=400,
-                detail="Model is not fitted. Please train the model first."
-            )
         except Exception as e:
             logger.error(f"Prediction failed: {str(e)}")
             raise HTTPException(
@@ -710,8 +714,8 @@ class ModelingService:
                 detail=f"Prediction failed: {str(e)}"
             )
     
-    def get_model_info(self, model_id: str) -> Dict[str, Any]:
-        """Get comprehensive information about a specific model from the registry."""
+    def get_model_info(self, model_id: str) -> ModelInfo:
+        """Get information about a specific model from the registry."""
         registry = self._load_model_registry()
         
         if model_id not in registry:
@@ -720,55 +724,98 @@ class ModelingService:
                 detail=f"Model with ID {model_id} not found in registry"
             )
         
-        model_info = registry[model_id].copy()
+        model_data = registry[model_id]
         
-        # Add model file existence check
-        model_path = Path(model_info.get('model_path', ''))
-        model_info['model_file_exists'] = model_path.exists()
-        model_info['model_file_size'] = model_path.stat().st_size if model_path.exists() else 0
-        
-        return model_info
+        # Convert to ModelInfo with safe defaults
+        try:
+            model_info = ModelInfo(
+                model_id=model_data.get('model_id', model_id),
+                timestamp=model_data.get('timestamp', datetime.now().isoformat()),
+                problem_type=model_data.get('problem_type', 'unknown'),
+                algorithm=model_data.get('algorithm', 'unknown'),
+                feature_columns=model_data.get('feature_columns', []),
+                target_column=model_data.get('target_column', ''),
+                model_path=model_data.get('model_path', ''),
+                hyperparameters=model_data.get('hyperparameters', {}),
+                train_size=model_data.get('train_size', 0),
+                test_size=model_data.get('test_size', 0),
+                training_time=model_data.get('total_training_time', 0.0),
+                metrics=model_data.get('metrics', {}),
+                best_score=model_data.get('best_score', 0.0)
+            )
+            return model_info
+        except Exception as e:
+            logger.error(f"Failed to convert model data to ModelInfo: {e}")
+            raise HTTPException(
+                status_code=500,
+                detail=f"Failed to retrieve model info: {str(e)}"
+            )
     
-    def list_models(self, include_stats: bool = True) -> Dict[str, Any]:
-        """List all models in the registry with optional statistics."""
+    def list_models(self, include_stats: bool = True) -> ModelListResponse:
+        """List all models in the registry."""
         registry = self._load_model_registry()
         
-        if not include_stats:
-            return registry
+        # Convert registry entries to ModelInfo objects
+        models = []
+        for model_id, model_data in registry.items():
+            try:
+                model_info = ModelInfo(
+                    model_id=model_data.get('model_id', model_id),
+                    timestamp=model_data.get('timestamp', datetime.now().isoformat()),
+                    problem_type=model_data.get('problem_type', 'unknown'),
+                    algorithm=model_data.get('algorithm', 'unknown'),
+                    feature_columns=model_data.get('feature_columns', []),
+                    target_column=model_data.get('target_column', ''),
+                    model_path=model_data.get('model_path', ''),
+                    hyperparameters=model_data.get('hyperparameters', {}),
+                    train_size=model_data.get('train_size', 0),
+                    test_size=model_data.get('test_size', 0),
+                    training_time=model_data.get('total_training_time', 0.0),
+                    metrics=model_data.get('metrics', {}),
+                    best_score=model_data.get('best_score', 0.0)
+                )
+                models.append(model_info)
+            except Exception as e:
+                logger.warning(f"Failed to parse model {model_id}: {e}")
+                continue
         
-        # Add summary statistics
-        total_models = len(registry)
-        classification_models = sum(1 for model in registry.values() 
-                                  if model.get('model_type') == ProblemType.CLASSIFICATION)
-        regression_models = sum(1 for model in registry.values() 
-                              if model.get('model_type') == ProblemType.REGRESSION)
+        # Create summary if requested
+        summary = None
+        if include_stats:
+            total_models = len(models)
+            classification_models = sum(1 for model in models 
+                                      if model.problem_type == ProblemType.CLASSIFICATION.value)
+            regression_models = sum(1 for model in models 
+                                  if model.problem_type == ProblemType.REGRESSION.value)
+            
+            # Get algorithm distribution
+            algorithm_counts = {}
+            for model in models:
+                algorithm = model.algorithm
+                algorithm_counts[algorithm] = algorithm_counts.get(algorithm, 0) + 1
+            
+            # Check for broken models (missing files)
+            broken_models = []
+            for model in models:
+                model_path = Path(model.model_path)
+                if not model_path.exists():
+                    broken_models.append(model.model_id)
+            
+            summary = ModelSummary(
+                total_models=total_models,
+                classification_models=classification_models,
+                regression_models=regression_models,
+                algorithm_distribution=algorithm_counts,
+                broken_models=broken_models
+            )
         
-        # Get algorithm distribution
-        algorithm_counts = {}
-        for model in registry.values():
-            algorithm = model.get('algorithm', 'unknown')
-            algorithm_counts[algorithm] = algorithm_counts.get(algorithm, 0) + 1
-        
-        # Check for broken models (missing files)
-        broken_models = []
-        for model_id, model_info in registry.items():
-            model_path = Path(model_info.get('model_path', ''))
-            if not model_path.exists():
-                broken_models.append(model_id)
-        
-        summary = {
-            "total_models": total_models,
-            "classification_models": classification_models,
-            "regression_models": regression_models,
-            "algorithm_distribution": algorithm_counts,
-            "broken_models": broken_models,
-            "models": registry
-        }
-        
-        return summary
+        return ModelListResponse(
+            models=models,
+            summary=summary
+        )
     
-    def delete_model(self, model_id: str, force: bool = False) -> bool:
-        """Delete a model and remove it from the registry with safety checks."""
+    def delete_model(self, model_id: str) -> dict:
+        """Delete a model and remove it from the registry."""
         registry = self._load_model_registry()
         
         if model_id not in registry:
@@ -781,19 +828,7 @@ class ModelingService:
         model_path = Path(model_info['model_path'])
         
         try:
-            # Safety check - prevent deletion of recently used models unless forced
-            if not force:
-                timestamp_str = model_info.get('timestamp', '')
-                if timestamp_str:
-                    try:
-                        model_timestamp = datetime.fromisoformat(timestamp_str.replace('Z', '+00:00'))
-                        time_diff = datetime.now() - model_timestamp.replace(tzinfo=None)
-                        if time_diff.total_seconds() < 3600:  # Less than 1 hour old
-                            logger.warning(f"Attempting to delete recent model {model_id} (created {time_diff})")
-                    except ValueError:
-                        pass  # Invalid timestamp format, proceed with deletion
-            
-            # Remove model file
+            # Remove model file if it exists
             if model_path.exists():
                 model_path.unlink()
                 logger.info(f"Model file deleted: {model_path}")
@@ -805,7 +840,7 @@ class ModelingService:
             self._save_model_registry(registry)
             
             logger.info(f"Model {model_id} deleted successfully")
-            return True
+            return {"message": f"Model {model_id} deleted successfully"}
             
         except Exception as e:
             logger.error(f"Failed to delete model {model_id}: {str(e)}")
@@ -814,7 +849,87 @@ class ModelingService:
                 detail=f"Failed to delete model: {str(e)}"
             )
     
-    def cleanup_broken_models(self) -> Dict[str, Any]:
+    def get_model_performance_comparison(self) -> dict:
+        """Get performance comparison of all models in the registry."""
+        registry = self._load_model_registry()
+        
+        if not registry:
+            return {"message": "No models found in registry"}
+        
+        classification_models = []
+        regression_models = []
+        
+        for model_id, model_info in registry.items():
+            problem_type = model_info.get('problem_type')
+            metrics = model_info.get('metrics', {})
+            
+            model_summary = {
+                "model_id": model_id,
+                "algorithm": model_info.get('algorithm', 'unknown'),
+                "timestamp": model_info.get('timestamp'),
+                "train_size": model_info.get('train_size'),
+                "test_size": model_info.get('test_size'),
+                "training_time": model_info.get('total_training_time'),
+                "best_score": model_info.get('best_score')
+            }
+            
+            if problem_type == ProblemType.CLASSIFICATION.value:
+                model_summary.update({
+                    "accuracy": metrics.get('accuracy'),
+                    "precision": metrics.get('precision'),
+                    "recall": metrics.get('recall'),
+                    "f1_score": metrics.get('f1_score')
+                })
+                classification_models.append(model_summary)
+            elif problem_type == ProblemType.REGRESSION.value:
+                model_summary.update({
+                    "mse": metrics.get('mse'),
+                    "rmse": metrics.get('rmse'),
+                    "r2_score": metrics.get('r2_score'),
+                    "mae": metrics.get('mae')
+                })
+                regression_models.append(model_summary)
+        
+        # Sort models by performance
+        if classification_models:
+            classification_models.sort(key=lambda x: x.get('accuracy', 0), reverse=True)
+        if regression_models:
+            regression_models.sort(key=lambda x: x.get('r2_score', -float('inf')), reverse=True)
+        
+        return {
+            "classification_models": classification_models,
+            "regression_models": regression_models,
+            "summary": {
+                "total_classification": len(classification_models),
+                "total_regression": len(regression_models),
+                "best_classification": classification_models[0] if classification_models else None,
+                "best_regression": regression_models[0] if regression_models else None
+            }
+        }
+    
+    def export_model_config(self, model_id: str) -> ModelConfigExport:
+        """Export model configuration for reproducibility."""
+        model_info = self.get_model_info(model_id)
+        
+        config = ModelConfigExport(
+            model_id=model_id,
+            problem_type=model_info.problem_type,
+            algorithm=model_info.algorithm,
+            feature_columns=model_info.feature_columns,
+            target_column=model_info.target_column,
+            hyperparameters=model_info.hyperparameters,
+            training_config={
+                "train_size": model_info.train_size,
+                "test_size": model_info.test_size,
+                "training_time": model_info.training_time
+            },
+            performance=model_info.metrics,
+            timestamp=model_info.timestamp
+        )
+        
+        return config
+    
+    def cleanup_broken_models(self) -> CleanupResult:
         """Clean up models that have missing files or corrupted registry entries."""
         registry = self._load_model_registry()
         cleaned_models = []
@@ -844,211 +959,130 @@ class ModelingService:
                     detail=f"Failed to save registry after cleanup: {str(e)}"
                 )
         
-        return {
-            "cleaned_models": cleaned_models,
-            "failed_cleanups": failed_cleanups,
-            "total_cleaned": len(cleaned_models)
-        }
+        return CleanupResult(
+            cleaned_models=cleaned_models,
+            failed_cleanups=failed_cleanups,
+            total_cleaned=len(cleaned_models)
+        )
     
-    def get_model_performance_comparison(self) -> Dict[str, Any]:
-        """Get performance comparison of all models in the registry."""
-        registry = self._load_model_registry()
-        
-        if not registry:
-            return {"message": "No models found in registry"}
-        
-        classification_models = []
-        regression_models = []
-        
-        for model_id, model_info in registry.items():
-            model_type = model_info.get('model_type')
-            metrics = model_info.get('metrics', {})
-            
-            model_summary = {
-                "model_id": model_id,
-                "algorithm": model_info.get('algorithm', 'unknown'),
-                "timestamp": model_info.get('timestamp'),
-                "train_size": model_info.get('train_size'),
-                "test_size": model_info.get('test_size'),
-                "training_time": model_info.get('total_training_time'),
-                "best_score": model_info.get('best_score')
-            }
-            
-            if model_type == ProblemType.CLASSIFICATION:
-                model_summary.update({
-                    "accuracy": metrics.get('accuracy'),
-                    "precision": metrics.get('precision'),
-                    "recall": metrics.get('recall'),
-                    "f1_score": metrics.get('f1_score')
-                })
-                classification_models.append(model_summary)
-            elif model_type == ProblemType.REGRESSION:
-                model_summary.update({
-                    "mse": metrics.get('mse'),
-                    "rmse": metrics.get('rmse'),
-                    "r2_score": metrics.get('r2_score'),
-                    "mae": metrics.get('mae')
-                })
-                regression_models.append(model_summary)
-        
-        # Sort models by performance
-        if classification_models:
-            classification_models.sort(key=lambda x: x.get('accuracy', 0), reverse=True)
-        if regression_models:
-            regression_models.sort(key=lambda x: x.get('r2_score', -float('inf')), reverse=True)
-        
-        return {
-            "classification_models": classification_models,
-            "regression_models": regression_models,
-            "summary": {
-                "total_classification": len(classification_models),
-                "total_regression": len(regression_models),
-                "best_classification": classification_models[0] if classification_models else None,
-                "best_regression": regression_models[0] if regression_models else None
-            }
-        }
-    
-    def export_model_config(self, model_id: str) -> Dict[str, Any]:
-        """Export model configuration for reproducibility."""
-        model_info = self.get_model_info(model_id)
-        
-        config = {
-            "model_id": model_id,
-            "model_type": model_info.get('model_type'),
-            "algorithm": model_info.get('algorithm'),
-            "feature_columns": model_info.get('feature_columns'),
-            "target_column": model_info.get('target_column'),
-            "hyperparameters": model_info.get('hyperparameters'),
-            "training_config": {
-                "train_size": model_info.get('train_size'),
-                "test_size": model_info.get('test_size'),
-                "training_time": model_info.get('total_training_time')
-            },
-            "performance": model_info.get('metrics'),
-            "data_info": model_info.get('data_info'),
-            "timestamp": model_info.get('timestamp')
-        }
-        
-        return config
-    
-    def validate_model_health(self, model_id: str) -> Dict[str, Any]:
+    def validate_model_health(self, model_id: str) -> ModelHealthStatus:
         """Perform health check on a specific model."""
         try:
             model_info = self.get_model_info(model_id)
-            model_path = Path(model_info['model_path'])
+            model_path = Path(model_info.model_path)
             
-            health_status = {
-                "model_id": model_id,
-                "healthy": True,
-                "issues": [],
-                "warnings": []
-            }
+            issues = []
+            warnings = []
             
             # Check if model file exists
             if not model_path.exists():
-                health_status["healthy"] = False
-                health_status["issues"].append("Model file not found")
-                return health_status
+                issues.append("Model file not found")
+                return ModelHealthStatus(
+                    model_id=model_id,
+                    healthy=False,
+                    issues=issues,
+                    warnings=warnings
+                )
             
             # Try to load the model
             try:
-                model = self.load_model(str(model_path))
+                model = joblib.load(model_path)
             except Exception as e:
-                health_status["healthy"] = False
-                health_status["issues"].append(f"Failed to load model: {str(e)}")
-                return health_status
+                issues.append(f"Failed to load model: {str(e)}")
+                return ModelHealthStatus(
+                    model_id=model_id,
+                    healthy=False,
+                    issues=issues,
+                    warnings=warnings
+                )
             
             # Check model attributes
             required_attrs = ['predict']
             for attr in required_attrs:
                 if not hasattr(model, attr):
-                    health_status["healthy"] = False
-                    health_status["issues"].append(f"Model missing required method: {attr}")
+                    issues.append(f"Model missing required method: {attr}")
             
             # Check if model is fitted
             try:
                 # Try to get feature importance or other fitted attributes
                 if hasattr(model, 'feature_importances_'):
                     if model.feature_importances_ is None:
-                        health_status["warnings"].append("Model may not be properly fitted")
+                        warnings.append("Model may not be properly fitted")
             except NotFittedError:
-                health_status["healthy"] = False
-                health_status["issues"].append("Model is not fitted")
+                issues.append("Model is not fitted")
             
             # Check registry consistency
-            expected_features = model_info.get('feature_columns', [])
+            expected_features = model_info.feature_columns
             if hasattr(model, 'n_features_in_'):
                 actual_features = model.n_features_in_
                 if len(expected_features) != actual_features:
-                    health_status["warnings"].append(
+                    warnings.append(
                         f"Feature count mismatch: registry={len(expected_features)}, model={actual_features}"
                     )
             
             # Check file size
             file_size = model_path.stat().st_size
             if file_size < 1000:  # Less than 1KB seems suspicious
-                health_status["warnings"].append(f"Model file unusually small: {file_size} bytes")
+                warnings.append(f"Model file unusually small: {file_size} bytes")
             elif file_size > 100_000_000:  # Larger than 100MB
-                health_status["warnings"].append(f"Model file very large: {file_size/1_000_000:.1f} MB")
+                warnings.append(f"Model file very large: {file_size/1_000_000:.1f} MB")
             
-            health_status["file_size"] = file_size
-            health_status["last_modified"] = model_path.stat().st_mtime
+            healthy = len(issues) == 0
             
-            return health_status
+            return ModelHealthStatus(
+                model_id=model_id,
+                healthy=healthy,
+                issues=issues,
+                warnings=warnings,
+                file_size=file_size,
+                last_modified=model_path.stat().st_mtime
+            )
             
         except Exception as e:
-            return {
-                "model_id": model_id,
-                "healthy": False,
-                "issues": [f"Health check failed: {str(e)}"],
-                "warnings": []
-            }
+            return ModelHealthStatus(
+                model_id=model_id,
+                healthy=False,
+                issues=[f"Health check failed: {str(e)}"],
+                warnings=[]
+            )
 
 
 # Create service instance
 modeling_service = ModelingService()
 
-# Convenience functions for backward compatibility and ease of use
-def train_model(df: pd.DataFrame, config: ModelConfig) -> TrainingResponse:
+# Public interface functions
+def train_model(config: ModelConfig) -> TrainingResponse:
     """Train a machine learning model based on configuration."""
-    return modeling_service.train_model(df, config)
+    return modeling_service.train_model(config)
 
-def evaluate_model(y_true: np.ndarray, y_pred: np.ndarray, model_type: str) -> EvaluationMetrics:
-    """Evaluate model performance and return metrics."""
-    return modeling_service.evaluate_model(y_true, y_pred, model_type)
-
-def load_model(model_path: str):
-    """Load a trained model from disk."""
-    return modeling_service.load_model(model_path)
-
-def predict(model_path: str, input_data: pd.DataFrame, validate_input: bool = True) -> PredictionResponse:
+def predict(model_id: str, data: pd.DataFrame) -> PredictionResponse:
     """Make predictions using a trained model."""
-    return modeling_service.predict(model_path, input_data, validate_input)
+    return modeling_service.predict(model_id, data)
 
-def get_model_info(model_id: str) -> Dict[str, Any]:
-    """Get information about a specific model."""
-    return modeling_service.get_model_info(model_id)
-
-def list_models(include_stats: bool = True) -> Dict[str, Any]:
+def list_models(include_stats: bool = True) -> ModelListResponse:
     """List all models in the registry."""
     return modeling_service.list_models(include_stats)
 
-def delete_model(model_id: str, force: bool = False) -> bool:
+def get_model_info(model_id: str) -> ModelInfo:
+    """Get information about a specific model."""
+    return modeling_service.get_model_info(model_id)
+
+def delete_model(model_id: str) -> dict:
     """Delete a model from the registry."""
-    return modeling_service.delete_model(model_id, force)
+    return modeling_service.delete_model(model_id)
 
-def cleanup_broken_models() -> Dict[str, Any]:
-    """Clean up models with missing files."""
-    return modeling_service.cleanup_broken_models()
-
-def get_model_performance_comparison() -> Dict[str, Any]:
+def get_model_performance_comparison() -> dict:
     """Get performance comparison of all models."""
     return modeling_service.get_model_performance_comparison()
 
-def export_model_config(model_id: str) -> Dict[str, Any]:
+def export_model_config(model_id: str) -> ModelConfigExport:
     """Export model configuration for reproducibility."""
     return modeling_service.export_model_config(model_id)
 
-def validate_model_health(model_id: str) -> Dict[str, Any]:
+def cleanup_broken_models() -> CleanupResult:
+    """Clean up models with missing files."""
+    return modeling_service.cleanup_broken_models()
+
+def validate_model_health(model_id: str) -> ModelHealthStatus:
     """Perform health check on a specific model."""
     return modeling_service.validate_model_health(model_id)
