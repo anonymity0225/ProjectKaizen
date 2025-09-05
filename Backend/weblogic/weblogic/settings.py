@@ -10,6 +10,7 @@ For the full list of settings and their values, see
 https://docs.djangoproject.com/en/5.2/ref/settings/
 """
 import os
+import sys
 from datetime import timedelta
 from pathlib import Path
 
@@ -38,7 +39,9 @@ INSTALLED_APPS = [
     'django.contrib.sessions',
     'django.contrib.messages',
     'django.contrib.staticfiles',
+    'rest_framework',
     'app1',
+    
 ]
 
 MIDDLEWARE = [
@@ -122,3 +125,13 @@ STATIC_URL = 'static/'
 # https://docs.djangoproject.com/en/5.2/ref/settings/#default-auto-field
 
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
+
+# Add Core/ProjKaizen to Python path for imports like `app.services.preprocessing`
+CORE_PROJ_PATH = BASE_DIR.parent / 'Core' / 'ProjKaizen'
+if CORE_PROJ_PATH.exists():
+    sys.path.insert(0, str(CORE_PROJ_PATH))
+
+# Ensure top-level Backend directory is importable so `Core` package resolves
+BACKEND_ROOT = BASE_DIR.parent
+if BACKEND_ROOT.exists():
+    sys.path.insert(0, str(BACKEND_ROOT))
